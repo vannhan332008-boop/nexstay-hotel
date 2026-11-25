@@ -1,18 +1,43 @@
 import fs from 'fs';
 import PDFDocument from 'pdfkit';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma.js';
 
-const prisma = new PrismaClient();
+const FONT_REGULAR_CANDIDATES = [
+  'C:\\Windows\\Fonts\\arial.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+];
 
-const FONT_REGULAR_PATH = 'C:\\Windows\\Fonts\\arial.ttf';
-const FONT_BOLD_PATH = 'C:\\Windows\\Fonts\\arialbd.ttf';
+const FONT_BOLD_CANDIDATES = [
+  'C:\\Windows\\Fonts\\arialbd.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+];
+
+function findExistingPath(paths) {
+  return paths.find((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+}
 
 function toSafeAscii(str = '') {
-  return String(str)
+  return String(str ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'D');
+    .replace(/Đ/g, 'D')
+    .replace(/₫/g, 'VND')
+    .replace(/[^\x20-\x7E\n\r\t\u2022]/g, '');
+}
+
+function formatDateSafe(val) {
+  if (!val) return '--/--/----';
+  const d = new Date(val);
+  return Number.isNaN(d.getTime()) ? '--/--/----' : d.toLocaleDateString('en-GB');
 }
 
 /**
@@ -37,16 +62,25 @@ export async function downloadInvoicePdf(req, res) {
 
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
 
-    const hasUnicodeRegular = fs.existsSync(FONT_REGULAR_PATH);
-    const hasUnicodeBold = fs.existsSync(FONT_BOLD_PATH);
+    doc.on('error', (err) => {
+      console.error('❌ PDF Stream Error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: err.message });
+      } else {
+        res.end();
+      }
+    });
+
+    const regularFontPath = findExistingPath(FONT_REGULAR_CANDIDATES);
+    const boldFontPath = findExistingPath(FONT_BOLD_CANDIDATES);
     let regularFont = 'Helvetica';
     let boldFont = 'Helvetica-Bold';
     let supportsUnicode = false;
 
-    if (hasUnicodeRegular && hasUnicodeBold) {
+    if (regularFontPath && boldFontPath) {
       try {
-        doc.registerFont('NexRegular', FONT_REGULAR_PATH);
-        doc.registerFont('NexBold', FONT_BOLD_PATH);
+        doc.registerFont('NexRegular', regularFontPath);
+        doc.registerFont('NexBold', boldFontPath);
         regularFont = 'NexRegular';
         boldFont = 'NexBold';
         supportsUnicode = true;
@@ -61,12 +95,15 @@ export async function downloadInvoicePdf(req, res) {
     const roomType = booking.room?.type || 'Smart Suite';
     const nightlyRate = Number(booking.room?.pricePerNight || 0);
     const totalAmount = Number(booking.totalAmount || 0);
-    const posCharges = booking.charges || [];
+    const posCharges = Array.isArray(booking.charges) ? booking.charges : [];
     const posChargesSum = posCharges.reduce((s, c) => s + Number(c.totalPrice || 0), 0);
     const roomStayGross = Math.max(0, totalAmount - posChargesSum);
 
+    const safeRoomFile = String(roomNumber).replace(/[^a-zA-Z0-9._-]/g, '_') || 'Room';
+    const safeIdFile = String(booking.id).slice(0, 8).replace(/[^a-zA-Z0-9._-]/g, '_');
+
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="NexStay_Invoice_Room${roomNumber}_${booking.id.slice(0, 8)}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="NexStay_Invoice_Room${safeRoomFile}_${safeIdFile}.pdf"`);
 
     doc.pipe(res);
 
@@ -77,10 +114,10 @@ export async function downloadInvoicePdf(req, res) {
     doc.fillColor('#FFFFFF').fontSize(12).font(boldFont).text(txt('HÓA ĐƠN ĐIỆN TỬ / ELECTRONIC TAX INVOICE'), 50, 92);
 
     // Invoice Meta on Right
-    doc.fillColor('#00F3FF').fontSize(10).font(boldFont).text(`INVOICE #${booking.id.slice(0, 8).toUpperCase()}`, 350, 42, { width: 195, align: 'right' });
+    doc.fillColor('#00F3FF').fontSize(10).font(boldFont).text(`INVOICE #${String(booking.id).slice(0, 8).toUpperCase()}`, 350, 42, { width: 195, align: 'right' });
     doc.fillColor('#CBD5E1').fontSize(9).font(regularFont).text(`Issued: ${new Date().toLocaleDateString('en-GB')}`, 350, 58, { width: 195, align: 'right' });
-    doc.text(`Payment Method: ${booking.paymentMethod || 'VIETQR'}`, 350, 72, { width: 195, align: 'right' });
-    doc.text(`Police C06 Ref: ${booking.policeDeclarationId || 'PENDING'}`, 350, 86, { width: 195, align: 'right' });
+    doc.text(txt(`Payment Method: ${booking.paymentMethod || 'VIETQR'}`), 350, 72, { width: 195, align: 'right' });
+    doc.text(txt(`Police C06 Ref: ${booking.policeDeclarationId || 'PENDING'}`), 350, 86, { width: 195, align: 'right' });
 
     // Watermark Seal
     const isPaid = booking.paymentStatus === 'COMPLETED';
@@ -103,10 +140,10 @@ export async function downloadInvoicePdf(req, res) {
       .text(txt(`Số CCCD / Passport:  ${guestId}`), 50, 203, { width: 320 })
       .text(txt(`Quốc tịch / Nationality:  ${booking.guestNationality || 'Việt Nam'}`), 50, 221, { width: 320 })
       .text(txt(`Địa chỉ / Address:  ${address}`), 50, 239, { width: 320 })
-      .text(`Digital Access Key:  ${booking.digitalKey}`, 50, 265, { width: 320 });
+      .text(txt(`Digital Access Key:  ${booking.digitalKey || 'NEX-KEY'}`), 50, 265, { width: 320 });
 
     // Stay Summary Box
-    doc.roundedRect(50, 298, 495, 65, 6).fill('#F8FAFC').strokeColor('#E2E8F0').stroke();
+    doc.roundedRect(50, 298, 495, 65, 6).fillAndStroke('#F8FAFC', '#E2E8F0');
     doc.fillColor('#0F172A').fontSize(10).font(boldFont)
       .text('SUITE / ROOM', 68, 312)
       .text('CHECK-IN', 235, 312)
@@ -115,8 +152,8 @@ export async function downloadInvoicePdf(req, res) {
 
     doc.fillColor('#334155').fontSize(10).font(regularFont)
       .text(txt(`#${roomNumber} - ${roomType}`), 68, 332, { width: 160 })
-      .text(new Date(booking.checkIn).toLocaleDateString('en-GB'), 235, 332)
-      .text(new Date(booking.checkOut).toLocaleDateString('en-GB'), 345, 332)
+      .text(formatDateSafe(booking.checkIn), 235, 332)
+      .text(formatDateSafe(booking.checkOut), 345, 332)
       .text(booking.isVip ? 'DIAMOND VIP' : 'STANDARD', 455, 332);
 
     // Line Item Table
@@ -134,32 +171,45 @@ export async function downloadInvoicePdf(req, res) {
     const vndTotal = Math.round(totalAmount * 25400).toLocaleString('en-US');
 
     doc.fillColor('#1E293B').fontSize(9.5).font(regularFont)
-      .text(txt(`Lưu trú thông minh - Phòng #${roomNumber} (${roomType})`), 65, y, { width: 260 })
+      .text(txt(`Lưu trú thông minh - Phòng #${roomNumber} (${roomType})`), 65, y, { width: 260, lineBreak: false })
       .text(`$${nightlyRate.toFixed(2)}/nt`, 330, y, { width: 90, align: 'right' })
       .text(`$${roomNet.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
-    y += 22;
-
-    // Render all POS Room Service & Mini-bar FolioCharges
-    for (const c of posCharges.slice(0, 6)) {
-      const cNet = +(Number(c.totalPrice || 0) / 1.1).toFixed(2);
-      doc.text(txt(`[POS ${c.category}] ${c.itemName}`), 65, y, { width: 260 })
-        .text(`x${c.quantity} ($${Number(c.unitPrice).toFixed(0)})`, 330, y, { width: 90, align: 'right' })
-        .text(`$${cNet.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
-      y += 20;
-    }
-
-    doc.text(txt('Tiện ích IoT 3D, Wi-Fi 7 & Trợ lý AI Concierge 24/7'), 65, y, { width: 260 })
-      .text('$0.00', 330, y, { width: 90, align: 'right' })
-      .text('INCLUDED', 435, y, { width: 95, align: 'right' });
     y += 20;
 
-    doc.text(txt('Thuế GTGT & Phí dịch vụ khách sạn (10% VAT)'), 65, y, { width: 260 })
+    // Render up to 6 POS items cleanly so 1-page A4 fits under both Arial and Linux Helvetica metrics
+    const maxVisiblePos = posCharges.length > 6 ? 5 : 6;
+    const visiblePos = posCharges.slice(0, maxVisiblePos);
+    const remainingPos = posCharges.slice(maxVisiblePos);
+
+    for (const c of visiblePos) {
+      const cNet = +(Number(c.totalPrice || 0) / 1.1).toFixed(2);
+      const label = txt(`[POS ${c.category || 'ITEM'}] ${c.itemName || 'Service'}`).slice(0, 44);
+      doc.text(label, 65, y, { width: 260, lineBreak: false })
+        .text(`x${Number(c.quantity || 1)} ($${Number(c.unitPrice || 0).toFixed(0)})`, 330, y, { width: 90, align: 'right' })
+        .text(`$${cNet.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
+      y += 19;
+    }
+
+    if (remainingPos.length > 0) {
+      const extraNet = +(remainingPos.reduce((s, c) => s + Number(c.totalPrice || 0), 0) / 1.1).toFixed(2);
+      doc.text(txt(`[POS] +${remainingPos.length} dich vu bo sung khac`), 65, y, { width: 260, lineBreak: false })
+        .text(`${remainingPos.length} items`, 330, y, { width: 90, align: 'right' })
+        .text(`$${extraNet.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
+      y += 19;
+    }
+
+    doc.text(txt('Tiện ích IoT 3D, Wi-Fi 7 & Trợ lý AI Concierge 24/7'), 65, y, { width: 260, lineBreak: false })
+      .text('$0.00', 330, y, { width: 90, align: 'right' })
+      .text('INCLUDED', 435, y, { width: 95, align: 'right' });
+    y += 19;
+
+    doc.text(txt('Thuế GTGT & Phí dịch vụ khách sạn (10% VAT)'), 65, y, { width: 260, lineBreak: false })
       .text('10%', 330, y, { width: 90, align: 'right' })
       .text(`$${vat.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
-    y += 24;
+    y += 22;
 
     doc.moveTo(50, y).lineTo(545, y).strokeColor('#CBD5E1').stroke();
-    y += 14;
+    y += 12;
 
     // Totals
     doc.fillColor('#0F172A').fontSize(12).font(boldFont)
@@ -168,17 +218,21 @@ export async function downloadInvoicePdf(req, res) {
       .text(`$${totalAmount.toFixed(2)}`, 435, y, { width: 95, align: 'right' });
 
     doc.fillColor('#475569').fontSize(10).font(regularFont)
-      .text(`Quy đổi VNĐ (1 USD = 25,400 VNĐ):  ${vndTotal} VND`, 180, y + 22, { width: 350, align: 'right' });
+      .text(txt(`Quy đổi VNĐ (1 USD = 25,400 VNĐ):  ${vndTotal} VND`), 180, y + 20, { width: 350, align: 'right' });
 
-    // Footer
-    doc.moveTo(50, 730).lineTo(545, 730).strokeColor('#E2E8F0').stroke();
+    // Footer (positioned safely on single A4 page across Windows & Linux fonts)
+    const footerY = Math.max(720, Math.min(750, y + 48));
+    doc.moveTo(50, footerY).lineTo(545, footerY).strokeColor('#E2E8F0').stroke();
     doc.fillColor('#64748B').fontSize(8.5).font(regularFont)
-      .text(txt('Cảm ơn quý khách đã lựa chọn NexStay Smart Hotel. Powered by Gemini AI, VNPay & VietQR Napas 24/7.'), 50, 745, { align: 'center', width: 495 })
-      .text('This electronic invoice is cryptographically verified and compliant with hospitality standards.', 50, 760, { align: 'center', width: 495 });
+      .text(txt('Cảm ơn quý khách đã lựa chọn NexStay Smart Hotel. Powered by Gemini AI, VNPay & VietQR Napas 24/7.'), 50, footerY + 15, { align: 'center', width: 495 })
+      .text('This electronic invoice is cryptographically verified and compliant with hospitality standards.', 50, footerY + 30, { align: 'center', width: 495 });
 
     doc.end();
   } catch (error) {
     console.error('❌ PDF Invoice Error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    return res.end();
   }
 }

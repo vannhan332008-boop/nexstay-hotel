@@ -1,8 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma.js';
 import { io } from '../index.js';
 import { computeHousekeepingQueue } from './roomController.js';
-
-const prisma = new PrismaClient();
 
 /**
  * GET /api/analytics/summary
@@ -146,14 +144,22 @@ export async function getAnalyticsSummary(req, res) {
  */
 export async function applyDynamicYield(req, res) {
   try {
-    const { multiplier = 1.15, reset = false } = req.body;
-    const rooms = await prisma.room.findMany();
+    const { multiplier = 1.15, reset = false } = req.body || {};
+    const parsedMultiplier = Number(multiplier);
+    const effectiveMultiplier = reset ? 1.0 : parsedMultiplier;
 
-    const effectiveMultiplier = reset ? 1.0 : Number(multiplier);
+    if (!Number.isFinite(effectiveMultiplier) || effectiveMultiplier <= 0 || effectiveMultiplier > 5) {
+      return res.status(400).json({
+        success: false,
+        message: 'Yield multiplier must be a positive number up to 5.0.',
+      });
+    }
+
+    const rooms = await prisma.room.findMany();
 
     await Promise.all(
       rooms.map((room) => {
-        const base = room.basePricePerNight || room.pricePerNight;
+        const base = Number(room.basePricePerNight || room.pricePerNight || 0);
         const newPrice = Math.round(base * effectiveMultiplier);
         return prisma.room.update({
           where: { id: room.id },

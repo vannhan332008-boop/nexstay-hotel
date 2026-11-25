@@ -1,8 +1,34 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma.js';
 import { io } from '../index.js';
 import { parseVoiceIoTCommand } from '../services/ai.service.js';
+import { getOrCreateGuestUser } from '../services/seedService.js';
 
-const prisma = new PrismaClient();
+const VALID_AMBIENT_COLORS = new Set(['CYAN', 'VIOLET', 'GOLD', 'WARM']);
+
+function sanitizeSmartControls(state = {}) {
+  const safe = {};
+  if (typeof state.lights === 'boolean') {
+    safe.lights = state.lights;
+  }
+  if (typeof state.ambientLighting === 'string' && VALID_AMBIENT_COLORS.has(state.ambientLighting)) {
+    safe.ambientLighting = state.ambientLighting;
+  }
+  if (state.acTemp !== undefined) {
+    const temp = Number(state.acTemp);
+    safe.acTemp = Number.isFinite(temp) ? Math.min(30, Math.max(16, Math.round(temp))) : 21;
+  }
+  if (state.curtainsOpen !== undefined) {
+    const open = Number(state.curtainsOpen);
+    safe.curtainsOpen = Number.isFinite(open) ? Math.min(100, Math.max(0, Math.round(open))) : 50;
+  }
+  if (typeof state.doorLocked === 'boolean') {
+    safe.doorLocked = state.doorLocked;
+  }
+  if (typeof state.scene === 'string' && state.scene.trim()) {
+    safe.scene = state.scene.trim().slice(0, 40);
+  }
+  return safe;
+}
 
 /**
  * POST /api/iot/control
@@ -10,13 +36,17 @@ const prisma = new PrismaClient();
  */
 export async function updateIoTControl(req, res) {
   try {
-    const { roomId, device, action, value, updates, source = 'UI' } = req.body;
+    const { roomId, device, action, value, updates, source = 'UI' } = req.body || {};
 
     if (!roomId) {
       return res.status(400).json({ success: false, message: 'roomId is required.' });
     }
 
-    const room = await prisma.room.findUnique({ where: { id: roomId } });
+    const validUpdates = sanitizeSmartControls(
+      updates && typeof updates === 'object' && !Array.isArray(updates) ? updates : {}
+    );
+
+    const room = await prisma.room.findUnique({ where: { id: String(roomId) } });
     if (!room) {
       return res.status(404).json({ success: false, message: 'Room not found.' });
     }
@@ -32,11 +62,13 @@ export async function updateIoTControl(req, res) {
 
     try {
       if (room.smartControls) {
-        currentState = { ...currentState, ...JSON.parse(room.smartControls) };
+        currentState = { ...currentState, ...sanitizeSmartControls(JSON.parse(room.smartControls)) };
       }
-    } catch {}
+    } catch {
+      // ignore malformed stored controls
+    }
 
-    const newState = { ...currentState, ...(updates || {}) };
+    const newState = sanitizeSmartControls({ ...currentState, ...validUpdates });
 
     const updatedRoom = await prisma.room.update({
       where: { id: roomId },
@@ -48,7 +80,7 @@ export async function updateIoTControl(req, res) {
         roomId,
         device: device || 'SYSTEM',
         action: action || 'UPDATE_STATE',
-        value: value !== undefined ? String(value) : JSON.stringify(updates || {}),
+        value: value !== undefined ? String(value) : JSON.stringify(validUpdates),
         source,
       },
       include: { room: { select: { number: true, type: true } } },
@@ -67,7 +99,7 @@ export async function updateIoTControl(req, res) {
         timestamp: logEntry.createdAt,
       });
 
-      if (device === 'DOOR_LOCK' && updates?.doorLocked === false) {
+      if (device === 'DOOR_LOCK' && validUpdates.doorLocked === false) {
         io.emit('reception:notification', {
           id: `IOT-DOOR-${Date.now()}`,
           roomNumber: room.number,
@@ -97,13 +129,13 @@ export async function updateIoTControl(req, res) {
  */
 export async function processVoiceIoT(req, res) {
   try {
-    const { roomId, transcript } = req.body;
-    if (!roomId || !transcript) {
+    const { roomId, transcript } = req.body || {};
+    if (!roomId || typeof transcript !== 'string' || !transcript.trim()) {
       return res.status(400).json({ success: false, message: 'roomId and transcript are required.' });
     }
 
     const room = await prisma.room.findUnique({
-      where: { id: roomId },
+      where: { id: String(roomId) },
       include: { bookings: { take: 1, orderBy: { createdAt: 'desc' } } },
     });
 
@@ -114,10 +146,12 @@ export async function processVoiceIoT(req, res) {
     let currentState = { lights: false, ambientLighting: 'CYAN', acTemp: 21, curtainsOpen: 50, doorLocked: true };
     try {
       if (room.smartControls) currentState = { ...currentState, ...JSON.parse(room.smartControls) };
-    } catch {}
+    } catch {
+      // ignore malformed JSON
+    }
 
     const parsed = await parseVoiceIoTCommand(transcript, currentState);
-    const newState = { ...currentState, ...(parsed.updates || {}) };
+    const newState = sanitizeSmartControls({ ...currentState, ...(parsed.updates || {}) });
 
     await prisma.room.update({
       where: { id: roomId },
@@ -137,7 +171,7 @@ export async function processVoiceIoT(req, res) {
 
     // If voice command also triggered a service request
     if (parsed.serviceRequest) {
-      const fallbackUser = await prisma.user.findFirst({ where: { role: 'GUEST' } });
+      const fallbackUser = await getOrCreateGuestUser();
       const userId = room.bookings?.[0]?.userId || fallbackUser?.id;
       if (userId) {
         await prisma.serviceRequest.create({

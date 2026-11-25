@@ -5,7 +5,7 @@ import { extractTextFromImage } from '../services/ai.service.js';
  */
 export async function processIdOcr(req, res) {
   try {
-    if (!req.file) {
+    if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'No ID document image provided. Please upload a valid JPG, PNG, or WEBP file.',

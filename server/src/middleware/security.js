@@ -47,6 +47,7 @@ export const paymentLimiter = rateLimit({
 export const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes window
   max: 300, // Limit each IP to 300 requests per window
+  skip: (req) => req.path === '/health',
   standardHeaders: true,
   legacyHeaders: false,
   message: {

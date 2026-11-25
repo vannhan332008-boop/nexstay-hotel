@@ -82,7 +82,7 @@ export default function PWAInstallPrompt() {
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 50, scale: 0.95 }}
         transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-        className="fixed bottom-5 left-4 right-4 md:left-auto md:right-8 md:max-w-md z-50"
+        className="fixed bottom-24 left-4 right-4 md:bottom-6 md:left-6 md:right-auto md:max-w-md z-40"
       >
         <div className="relative overflow-hidden rounded-2xl bg-[#1A1F2C]/95 border border-cyan-400/40 p-4 md:p-5 shadow-2xl backdrop-blur-2xl shadow-cyan-500/20">
           <div className="absolute -top-12 -right-12 w-28 h-28 bg-cyan-400/20 rounded-full blur-2xl pointer-events-none" />

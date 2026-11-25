@@ -1,9 +1,8 @@
 import express from 'express';
 import { createPaymentUrl, vnpayReturn } from '../controllers/paymentController.js';
-import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 // Route: POST /api/payment/create_url
 router.post('/create_url', createPaymentUrl);

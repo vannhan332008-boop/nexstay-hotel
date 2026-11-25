@@ -1,4 +1,4 @@
-import React, { useState, Suspense, lazy, useEffect } from 'react';
+import React, { useState, Suspense, lazy, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutGrid,
@@ -18,9 +18,11 @@ import {
   Download,
   ArrowLeft,
   RotateCcw,
+  RefreshCw,
 } from 'lucide-react';
 import { AppProvider } from './context/AppContext';
 import { useApp } from './context/useApp';
+import { apiFetch, apiUrl } from './utils/api';
 import PWAInstallPrompt from './components/common/PWAInstallPrompt';
 import AIConciergeFloating from './components/guest/AIConciergeFloating';
 
@@ -28,6 +30,12 @@ const GuestSmartRoomVIP = lazy(() => import('./components/guest/GuestSmartRoomVI
 const InteractiveRoomMatrix = lazy(() => import('./components/reception/InteractiveRoomMatrix'));
 const ExpressCheckInOCR = lazy(() => import('./components/reception/ExpressCheckInOCR'));
 const AdminSuperVIPDashboard = lazy(() => import('./components/admin/AdminSuperVIPDashboard'));
+
+function formatSafeTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString('vi-VN');
+}
 
 function ModuleLoadingFallback({ title = 'Initializing Module' }) {
   return (
@@ -51,26 +59,36 @@ function PaymentCallbackView({ pathname, onReturnHome }) {
   const bookingId = params.get('bookingId') || '';
   const transactionNo = params.get('transactionNo') || '';
   const amount = params.get('amount') || '';
-  const reason = params.get('reason') || '';
+  const reason = params.get('reason') || params.get('error') || '';
 
   const [bookingInfo, setBookingInfo] = useState(null);
+  const [loadingBooking, setLoadingBooking] = useState(Boolean(bookingId));
 
   useEffect(() => {
-    if (!bookingId) return;
-    fetch(`/api/payment/status/${bookingId}`)
-      .then((r) => r.json())
+    if (!bookingId) return undefined;
+    let active = true;
+    apiFetch(`/api/payment/status/${encodeURIComponent(bookingId)}`, { timeoutMs: 55000 })
       .then((j) => {
-        if (j.success) setBookingInfo(j.booking);
+        if (active && j.success) setBookingInfo(j.booking);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingBooking(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [bookingId]);
+
+  const numericAmount = Number(amount);
+  const hasValidAmount = Boolean(amount) && Number.isFinite(numericAmount);
 
   return (
     <div className="w-full max-w-lg mx-auto py-14 px-4">
       <motion.div
         initial={{ opacity: 0, scale: 0.94 }}
         animate={{ opacity: 1, scale: 1 }}
-        className={`rounded-3xl border p-8 text-center space-y-5 backdrop-blur-xl ${
+        className={`rounded-3xl border p-6 sm:p-8 text-center space-y-5 backdrop-blur-xl ${
           isDark ? 'bg-[#1A1F2C]/90 border-white/10 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-xl'
         }`}
       >
@@ -100,21 +118,27 @@ function PaymentCallbackView({ pathname, onReturnHome }) {
         {bookingId && (
           <div className={`p-4 rounded-2xl border text-left text-xs font-mono space-y-1.5 ${isDark ? 'bg-[#0B0F19]/80 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
             <div>Booking ID: <span className="text-cyan-400">{bookingId.slice(0, 12)}...</span></div>
+            {loadingBooking && !bookingInfo && (
+              <div className="text-slate-400 flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {t('Đang tải chi tiết đặt phòng...', 'Fetching booking details...')}
+              </div>
+            )}
             {bookingInfo && (
               <>
-                <div>Guest: <span className="font-bold">{bookingInfo.guestName}</span></div>
-                <div>Room: <span className="text-cyan-400">#{bookingInfo.roomNumber} ({bookingInfo.roomType})</span></div>
+                <div>Guest: <span className="font-bold">{bookingInfo.guestName || 'Guest'}</span></div>
+                <div>Room: <span className="text-cyan-400">#{bookingInfo.roomNumber || 'N/A'} ({bookingInfo.roomType || 'Suite'})</span></div>
               </>
             )}
             {transactionNo && <div>VNPay Txn: <span className="text-emerald-400">{transactionNo}</span></div>}
-            {amount && <div>Amount VND: <span>{Number(amount).toLocaleString('vi-VN')} ₫</span></div>}
+            {hasValidAmount && <div>Amount VND: <span>{numericAmount.toLocaleString('vi-VN')} ₫</span></div>}
           </div>
         )}
 
         <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
           {isSuccess && bookingId && (
             <a
-              href={`/api/invoice/${bookingId}`}
+              href={apiUrl(`/api/invoice/${encodeURIComponent(bookingId)}`)}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-400 to-violet-600 text-slate-950 font-bold text-xs shadow-neon-cyan"
@@ -149,6 +173,11 @@ function NexStayShell() {
     liveToast,
     dismissToast,
     showCustomToast,
+    serverStatus,
+    isWakingUp,
+    wakeElapsedSec,
+    retryConnection,
+    triggerDemoResetRefresh,
   } = useApp();
   const isDark = theme === 'dark';
 
@@ -156,6 +185,31 @@ function NexStayShell() {
   const [activeTab, setActiveTab] = useState('guest');
   const [showNotifPanel, setShowNotifPanel] = useState(false);
   const [resettingDemo, setResettingDemo] = useState(false);
+  const notifContainerRef = useRef(null);
+
+  useEffect(() => {
+    const onPopState = () => setPathname(window.location.pathname);
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (!showNotifPanel) return undefined;
+    const onMouseDown = (e) => {
+      if (notifContainerRef.current && !notifContainerRef.current.contains(e.target)) {
+        setShowNotifPanel(false);
+      }
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setShowNotifPanel(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showNotifPanel]);
 
   const isPaymentRoute = pathname.startsWith('/payment/success') || pathname.startsWith('/payment/failed');
 
@@ -168,10 +222,10 @@ function NexStayShell() {
     if (resettingDemo) return;
     setResettingDemo(true);
     try {
-      const res = await fetch('/api/system/reset-demo', { method: 'POST' });
-      const json = await res.json();
-      if (!res.ok || !json.success) throw new Error(json.message || 'Reset failed');
+      const json = await apiFetch('/api/system/reset-demo', { method: 'POST', timeoutMs: 55000 });
+      if (!json.success) throw new Error(json.message || 'Reset failed');
       clearNotifications();
+      triggerDemoResetRefresh();
       showCustomToast(t('✨ Đã khôi phục dữ liệu thuyết trình mặc định!', '✨ Demo data restored to clean state!'));
     } catch (err) {
       showCustomToast(`❌ Reset error: ${err.message}`);
@@ -250,7 +304,7 @@ function NexStayShell() {
               title={t('Khôi phục dữ liệu mẫu thuyết trình', 'Restore default presentation demo data')}
             >
               <RotateCcw className={`w-3.5 h-3.5 ${resettingDemo ? 'animate-spin text-rose-400' : ''}`} />
-              <span className="hidden xl:inline">{t('Reset Demo Data', 'Reset Demo Data')}</span>
+              <span className="hidden xl:inline">{t('Khôi Phục Demo', 'Reset Demo Data')}</span>
             </button>
 
             <button
@@ -274,7 +328,7 @@ function NexStayShell() {
               {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            <div className="relative">
+            <div className="relative" ref={notifContainerRef}>
               <button
                 onClick={() => setShowNotifPanel((v) => !v)}
                 className={`p-2 rounded-xl border transition-all relative ${
@@ -296,11 +350,11 @@ function NexStayShell() {
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 10 }}
-                    className={`absolute right-0 mt-2 w-80 rounded-2xl border p-4 shadow-2xl z-50 backdrop-blur-2xl ${
+                    className={`absolute right-0 mt-2 w-[calc(100vw-2rem)] sm:w-80 rounded-2xl border p-4 shadow-2xl z-50 backdrop-blur-2xl ${
                       isDark ? 'bg-[#141925]/95 border-cyan-400/30 text-white' : 'bg-white border-slate-200 text-slate-900'
                     }`}
                   >
-                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                    <div className={`flex items-center justify-between pb-2 mb-2 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                       <span className="text-xs font-bold flex items-center gap-1.5">
                         <Zap className="w-3.5 h-3.5 text-cyan-400" />
                         {t('Trung Tâm Cảnh Báo Live', 'Real-Time Notification Hub')}
@@ -317,7 +371,7 @@ function NexStayShell() {
                           <div key={n.id || i} className={`p-2.5 rounded-xl border text-[11px] ${isDark ? 'bg-[#0B0F19]/80 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
                             <p className="font-medium">{n.message}</p>
                             <span className="text-[9px] text-slate-500 font-mono">
-                              {new Date(n.timestamp).toLocaleTimeString('vi-VN')}
+                              {formatSafeTime(n.timestamp)}
                             </span>
                           </div>
                         ))
@@ -356,6 +410,54 @@ function NexStayShell() {
           })}
         </div>
       </header>
+
+      {/* Render Free Tier Cold-Start / Backend Connectivity Banner */}
+      <AnimatePresence>
+        {(isWakingUp || serverStatus === 'offline') && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className={`border-b px-4 py-2.5 text-xs ${
+              serverStatus === 'offline' && !isWakingUp
+                ? 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+                : 'bg-amber-500/15 border-amber-400/30 text-amber-300'
+            }`}
+          >
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                {isWakingUp ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-amber-400" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                )}
+                <span>
+                  {isWakingUp
+                    ? t(
+                        `Đang đánh thức máy chủ Render Free Tier (~30–50s cho lần truy cập đầu)... ${wakeElapsedSec > 0 ? `(${wakeElapsedSec}s)` : ''}`,
+                        `Waking up Render Free Tier backend (~30–50s on cold start)... ${wakeElapsedSec > 0 ? `(${wakeElapsedSec}s)` : ''}`
+                      )
+                    : t(
+                        'Chưa kết nối được máy chủ backend. Máy chủ có thể đang khởi động lại.',
+                        'Unable to reach backend server. It may still be starting up.'
+                      )}
+                </span>
+              </div>
+
+              {serverStatus === 'offline' && !isWakingUp && (
+                <button
+                  type="button"
+                  onClick={retryConnection}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 font-semibold"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  {t('Thử kết nối lại', 'Retry Connection')}
+                </button>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <main className="py-4 pb-24">
         {isPaymentRoute ? (

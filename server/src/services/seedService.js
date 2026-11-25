@@ -1,12 +1,59 @@
-import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import prisma from '../lib/prisma.js';
 
-const prisma = new PrismaClient();
+let activeResetPromise = null;
 
 /**
- * Resets and seeds the NexStay database to a clean presentation-ready state
+ * Finds a GUEST (or any existing) user, or creates a fallback guest user safely
+ */
+export async function getOrCreateGuestUser(db = prisma) {
+  const guest = await db.user.findFirst({ where: { role: 'GUEST' } });
+  if (guest) return guest;
+  const anyUser = await db.user.findFirst();
+  if (anyUser) return anyUser;
+  return db.user.create({
+    data: {
+      name: 'Walk-in VIP Guest',
+      email: `guest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@nexstay.com`,
+      password: 'demo-placeholder-hash',
+      role: 'GUEST',
+    },
+  });
+}
+
+/**
+ * Ensures the database is populated on fresh server boots (e.g., Render Free Tier)
+ */
+export async function ensureDatabaseSeeded() {
+  const [roomCount, userCount] = await Promise.all([
+    prisma.room.count(),
+    prisma.user.count(),
+  ]);
+
+  if (roomCount === 0 && userCount === 0) {
+    console.log('🌱 Empty database detected — auto-seeding NexStay default dataset...');
+    return resetDemoDatabase();
+  }
+
+  return { skipped: true, roomCount, userCount };
+}
+
+/**
+ * Resets and seeds the NexStay database to a clean presentation-ready state (concurrency-safe)
  */
 export async function resetDemoDatabase() {
+  if (activeResetPromise) {
+    return activeResetPromise;
+  }
+
+  activeResetPromise = runResetDemoDatabase().finally(() => {
+    activeResetPromise = null;
+  });
+
+  return activeResetPromise;
+}
+
+async function runResetDemoDatabase() {
   await prisma.conciergeLog.deleteMany();
   await prisma.ioTLog.deleteMany();
   await prisma.folioCharge.deleteMany();

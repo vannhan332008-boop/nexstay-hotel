@@ -15,6 +15,7 @@ import {
   Download,
 } from 'lucide-react';
 import { useApp } from '../../context/useApp';
+import { apiFetch, apiUrl } from '../../utils/api';
 
 function getDefaultDates() {
   const now = Date.now();
@@ -33,7 +34,8 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
     return avail.length > 0 ? avail : rooms;
   }, [rooms]);
 
-  const [bookingSource, setBookingSource] = useState(defaultSource);
+  const [bookingSourceOverride, setBookingSourceOverride] = useState(null);
+  const bookingSource = bookingSourceOverride ?? defaultSource;
   const [selectedRoomId, setSelectedRoomId] = useState('');
   const [checkIn, setCheckIn] = useState(() => getDefaultDates().checkIn);
   const [checkOut, setCheckOut] = useState(() => getDefaultDates().checkOut);
@@ -55,6 +57,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
   const nights = useMemo(() => {
     const start = new Date(checkIn);
     const end = new Date(checkOut);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 1;
     const diff = end.getTime() - start.getTime();
     return Math.max(1, Math.ceil(diff / 86400000) || 1);
   }, [checkIn, checkOut]);
@@ -63,6 +66,23 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
   const totalEstimateUSD = Math.round(unitRate * nights);
   const totalEstimateVND = Math.round(totalEstimateUSD * 25400);
 
+  const handleCheckInChange = (val) => {
+    setCheckIn(val);
+    if (val && checkOut && val >= checkOut) {
+      const nextDay = new Date(new Date(val).getTime() + 86400000);
+      if (!Number.isNaN(nextDay.getTime())) {
+        setCheckOut(nextDay.toISOString().split('T')[0]);
+      }
+    }
+  };
+
+  const handleCheckOutChange = (val) => {
+    setCheckOut(val);
+    if (val && checkIn && val < checkIn) {
+      setCheckIn(val);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!activeRoom) return;
@@ -70,7 +90,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
     setError('');
 
     try {
-      const res = await fetch('/api/bookings', {
+      const json = await apiFetch('/api/bookings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -88,8 +108,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
           paymentMethod,
         }),
       });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
+      if (!json.success) {
         throw new Error(json.message || 'Booking failed.');
       }
       setCreatedResult(json);
@@ -104,13 +123,13 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
   const handleClose = () => {
     setCreatedResult(null);
     setError('');
+    setSelectedRoomId('');
+    setBookingSourceOverride(null);
     setGuestName('');
     setGuestPhone('');
     setGuestIdNumber('');
     onClose();
   };
-
-  if (!isOpen) return null;
 
   const inputClass = isDark
     ? 'bg-[#0B0F19]/80 border-white/10 text-white placeholder-slate-500 focus:border-cyan-400'
@@ -118,17 +137,18 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
 
   return (
     <AnimatePresence>
+      {isOpen && (
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
+        className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-start sm:items-center justify-center p-4 overflow-y-auto"
       >
         <motion.div
           initial={{ scale: 0.94, opacity: 0, y: 16 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           exit={{ scale: 0.94, opacity: 0, y: 16 }}
-          className={`w-full max-w-2xl rounded-3xl border p-6 md:p-7 shadow-2xl relative my-6 ${
+          className={`w-full max-w-2xl rounded-3xl border p-5 sm:p-6 md:p-7 shadow-2xl relative my-auto ${
             isDark ? 'bg-[#141925] border-cyan-400/35 text-white' : 'bg-white border-slate-200 text-slate-900'
           }`}
         >
@@ -140,12 +160,12 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
             <X className="w-4 h-4" />
           </button>
 
-          <div className="flex items-center gap-3 mb-5">
-            <div className="p-2.5 rounded-xl bg-cyan-500/15 border border-cyan-400/30 text-cyan-400">
+          <div className="flex items-center gap-3 mb-5 pr-8">
+            <div className="p-2.5 rounded-xl bg-cyan-500/15 border border-cyan-400/30 text-cyan-400 shrink-0">
               <CalendarPlus className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-lg font-bold flex items-center gap-2">
+              <h3 className="text-base sm:text-lg font-bold flex flex-wrap items-center gap-2">
                 {t('Đặt Phòng Thông Minh (Online & Tại Quầy)', 'Smart Reservation & Walk-In')}
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-400/15 text-cyan-400 border border-cyan-400/30 font-mono">
                   AI Yield Pricing
@@ -167,23 +187,25 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
                   {t('Đặt Phòng Thành Công!', 'Reservation Confirmed!')}
                 </h4>
                 <p className="text-xs text-slate-400 mt-1">
-                  {t('Khách', 'Guest')}: <strong className={isDark ? 'text-white' : 'text-slate-900'}>{createdResult.booking?.guestName}</strong> ➜ P.{createdResult.booking?.room?.number} ({createdResult.nights} {t('đêm', 'nights')})
+                  {t('Khách', 'Guest')}: <strong className={isDark ? 'text-white' : 'text-slate-900'}>{createdResult.booking?.guestName || guestName}</strong> ➜ P.{createdResult.booking?.room?.number || activeRoom?.number || 'N/A'} ({createdResult.nights || nights} {t('đêm', 'nights')})
                 </p>
               </div>
               <div className="inline-block p-3 rounded-2xl bg-white shadow-xl">
-                <QRCodeSVG value={createdResult.digitalKey} size={108} />
+                <QRCodeSVG value={createdResult.digitalKey || 'NEX-KEY-LIVE'} size={108} />
               </div>
-              <div className="text-xs font-mono text-cyan-400">Digital Key: {createdResult.digitalKey}</div>
+              <div className="text-xs font-mono text-cyan-400 break-all">Digital Key: {createdResult.digitalKey || 'NEX-KEY-LIVE'}</div>
               <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                <a
-                  href={`/api/invoice/${createdResult.booking?.id}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-400 to-violet-600 text-slate-950 font-bold text-xs shadow-neon-cyan"
-                >
-                  <Download className="w-4 h-4" />
-                  {t('Xem Phiếu & Hóa Đơn PDF', 'Download PDF Invoice')}
-                </a>
+                {createdResult.booking?.id && (
+                  <a
+                    href={apiUrl(`/api/invoice/${createdResult.booking.id}`)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-400 to-violet-600 text-slate-950 font-bold text-xs shadow-neon-cyan"
+                  >
+                    <Download className="w-4 h-4" />
+                    {t('Xem Phiếu & Hóa Đơn PDF', 'Download PDF Invoice')}
+                  </a>
+                )}
                 <button
                   onClick={handleClose}
                   className={`px-5 py-2.5 rounded-xl border text-xs font-semibold ${isDark ? 'border-white/15 bg-white/5 text-white' : 'border-slate-300 bg-slate-100 text-slate-800'}`}
@@ -198,14 +220,14 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
               <div className={`flex p-1 rounded-xl border text-xs ${isDark ? 'bg-[#0B0F19] border-white/10' : 'bg-slate-100 border-slate-200'}`}>
                 <button
                   type="button"
-                  onClick={() => setBookingSource('ONLINE')}
+                  onClick={() => setBookingSourceOverride('ONLINE')}
                   className={`flex-1 py-2 rounded-lg font-bold transition-all ${bookingSource === 'ONLINE' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400'}`}
                 >
                   🌐 {t('Đặt Phòng Trực Tuyến (Online)', 'Online Reservation')}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBookingSource('WALK_IN')}
+                  onClick={() => setBookingSourceOverride('WALK_IN')}
                   className={`flex-1 py-2 rounded-lg font-bold transition-all ${bookingSource === 'WALK_IN' ? 'bg-violet-600 text-white' : 'text-slate-400'}`}
                 >
                   🛎️ {t('Khách Lẻ Tại Quầy (Walk-in)', 'Front Desk Walk-in')}
@@ -219,7 +241,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
                   <input
                     type="date"
                     value={checkIn}
-                    onChange={(e) => setCheckIn(e.target.value)}
+                    onChange={(e) => handleCheckInChange(e.target.value)}
                     required
                     className={`w-full px-3 py-2 rounded-xl border text-xs outline-none ${inputClass}`}
                   />
@@ -230,7 +252,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
                     type="date"
                     value={checkOut}
                     min={checkIn}
-                    onChange={(e) => setCheckOut(e.target.value)}
+                    onChange={(e) => handleCheckOutChange(e.target.value)}
                     required
                     className={`w-full px-3 py-2 rounded-xl border text-xs outline-none ${inputClass}`}
                   />
@@ -243,40 +265,46 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
                   <BedDouble className="w-3.5 h-3.5 text-cyan-400" />
                   {t('Chọn Phòng (Giá hiển thị đã bao gồm AI Yield)', 'Select Suite (Live AI Yield Rate)')}
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-36 overflow-y-auto pr-1 custom-scrollbar">
-                  {rooms.map((r) => {
-                    const isSelected = activeRoom?.id === r.id;
-                    const isAvail = r.status === 'AVAILABLE';
-                    return (
-                      <button
-                        key={r.id}
-                        type="button"
-                        onClick={() => setSelectedRoomId(r.id)}
-                        className={`p-2.5 rounded-xl border text-left transition-all ${
-                          isSelected
-                            ? 'border-cyan-400 bg-cyan-500/15 shadow-neon-cyan'
-                            : isDark
-                            ? 'border-white/10 bg-[#0B0F19]/60 hover:border-white/25'
-                            : 'border-slate-200 bg-slate-50 hover:border-cyan-500'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between text-xs font-bold">
-                          <span>P.{r.number}</span>
-                          <span className={`text-[9px] px-1.5 rounded ${isAvail ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
-                            {r.status === 'AVAILABLE' ? t('Trống', 'Open') : r.status}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-400 truncate mt-0.5">{r.type}</div>
-                        <div className="text-xs font-mono font-bold text-cyan-400 mt-1">
-                          ${r.pricePerNight}/nt
-                          {Number(r.yieldMultiplier || 1) > 1 && (
-                            <span className="text-[9px] text-amber-400 ml-1">x{Number(r.yieldMultiplier).toFixed(2)}</span>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                {rooms.length === 0 ? (
+                  <div className={`p-3 rounded-xl border text-xs text-slate-400 ${isDark ? 'border-white/10 bg-[#0B0F19]/50' : 'border-slate-200 bg-slate-50'}`}>
+                    {t('Đang tải danh sách phòng từ máy chủ...', 'Loading suites from server...')}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-36 overflow-y-auto pr-1 custom-scrollbar">
+                    {rooms.map((r) => {
+                      const isSelected = activeRoom?.id === r.id;
+                      const isAvail = r.status === 'AVAILABLE';
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setSelectedRoomId(r.id)}
+                          className={`p-2.5 rounded-xl border text-left transition-all ${
+                            isSelected
+                              ? 'border-cyan-400 bg-cyan-500/15 shadow-neon-cyan'
+                              : isDark
+                              ? 'border-white/10 bg-[#0B0F19]/60 hover:border-white/25'
+                              : 'border-slate-200 bg-slate-50 hover:border-cyan-500'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between text-xs font-bold">
+                            <span>P.{r.number}</span>
+                            <span className={`text-[9px] px-1.5 rounded ${isAvail ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                              {r.status === 'AVAILABLE' ? t('Trống', 'Open') : r.status}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-400 truncate mt-0.5">{r.type}</div>
+                          <div className="text-xs font-mono font-bold text-cyan-400 mt-1">
+                            ${Number(r.pricePerNight || 0)}/nt
+                            {Number(r.yieldMultiplier || 1) > 1 && (
+                              <span className="text-[9px] text-amber-400 ml-1">x{Number(r.yieldMultiplier).toFixed(2)}</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Guest Info */}
@@ -383,6 +411,7 @@ export default function NewBookingModal({ isOpen, onClose, rooms = [], onBooking
           )}
         </motion.div>
       </motion.div>
+      )}
     </AnimatePresence>
   );
 }

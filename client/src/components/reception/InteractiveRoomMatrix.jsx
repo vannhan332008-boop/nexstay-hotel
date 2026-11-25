@@ -1,16 +1,17 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   DndContext,
   DragOverlay,
   useDroppable,
   useDraggable,
   closestCorners,
-  PointerSensor,
+  MouseSensor,
+  TouchSensor,
+  KeyboardSensor,
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
 import { motion, AnimatePresence } from 'framer-motion';
-import { io } from 'socket.io-client';
 import {
   DoorClosed,
   User,
@@ -24,8 +25,10 @@ import {
   GripVertical,
   Zap,
   CalendarPlus,
+  AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/useApp';
+import { apiFetch } from '../../utils/api';
 import NewBookingModal from '../common/NewBookingModal';
 
 const COLUMNS = [
@@ -107,26 +110,26 @@ function DraggableRoomCard({ room, isOverlay = false, isDark = true }) {
       }`}
     >
       <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <span
-            className={`flex items-center justify-center w-8 h-8 rounded-lg border font-bold font-mono text-sm transition-colors ${
+            className={`flex items-center justify-center w-8 h-8 rounded-lg border font-bold font-mono text-sm shrink-0 transition-colors ${
               isDark
                 ? 'bg-white/5 border-white/10 text-white group-hover:border-cyan-400/50 group-hover:text-cyan-400'
                 : 'bg-slate-100 border-slate-200 text-slate-900 group-hover:border-cyan-500 group-hover:text-cyan-600'
             }`}
           >
-            {room.number}
+            {room.number || '--'}
           </span>
-          <div>
-            <h4 className="text-xs font-semibold tracking-tight line-clamp-1">{room.type}</h4>
+          <div className="min-w-0">
+            <h4 className="text-xs font-semibold tracking-tight line-clamp-1">{room.type || 'Smart Suite'}</h4>
             <span className="text-[10px] text-slate-400">
-              Floor {room.floor}
+              Floor {room.floor ?? '-'}
               {Number(room.yieldMultiplier || 1) > 1 ? ` • AI x${Number(room.yieldMultiplier).toFixed(2)}` : ''}
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
           <span className={`text-[11px] font-mono font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
             ${Number(room.pricePerNight || 0)}
             <span className="text-[9px] text-slate-500">/nt</span>
@@ -138,17 +141,17 @@ function DraggableRoomCard({ room, isOverlay = false, isDark = true }) {
       </div>
 
       {room.status === 'OCCUPIED' && guestName ? (
-        <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
+        <div className={`mt-2.5 pt-2 border-t flex items-center justify-between text-[11px] ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
           <div className={`flex items-center gap-1.5 font-medium truncate ${isDark ? 'text-cyan-300' : 'text-cyan-700'}`}>
             <User className="w-3 h-3 text-cyan-400 shrink-0" />
             <span className="truncate">{guestName}</span>
           </div>
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-400 border border-cyan-400/20 font-mono">
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-400 border border-cyan-400/20 font-mono shrink-0">
             Active Key
           </span>
         </div>
       ) : (
-        <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[10px] text-slate-400">
+        <div className={`mt-2.5 pt-2 border-t flex items-center justify-between text-[10px] text-slate-400 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
           <span className="flex items-center gap-1">
             <Radio className="w-2.5 h-2.5 text-emerald-400 animate-pulse" />
             IoT Telemetry
@@ -169,17 +172,17 @@ function KanbanColumn({ column, rooms, isOver, isDark, lang }) {
   return (
     <div
       ref={setNodeRef}
-      className={`flex flex-col rounded-2xl border transition-all duration-300 backdrop-blur-xl min-h-[500px] p-4 ${
+      className={`flex flex-col rounded-2xl border transition-all duration-300 backdrop-blur-xl min-h-[240px] lg:min-h-[500px] p-4 ${
         isDark ? 'bg-[#141925]/80' : 'bg-slate-50/90 shadow-md'
       } ${isOver ? column.overClass : column.borderClass}`}
     >
-      <div className="flex items-center justify-between pb-3 mb-3 border-b border-white/10">
-        <div className="flex items-center gap-2">
-          <span className={`p-1.5 rounded-lg border ${column.headerBadge}`}>
+      <div className={`flex items-center justify-between pb-3 mb-3 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`p-1.5 rounded-lg border shrink-0 ${column.headerBadge}`}>
             <Icon className="w-4 h-4" />
           </span>
-          <div>
-            <h3 className={`text-xs font-bold uppercase tracking-wider ${isDark ? 'text-white' : 'text-slate-900'}`}>
+          <div className="min-w-0">
+            <h3 className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
               {lang === 'vi' ? column.labelVi : column.labelEn}
             </h3>
             <p className="text-[10px] text-slate-400 line-clamp-1">
@@ -188,14 +191,14 @@ function KanbanColumn({ column, rooms, isOver, isDark, lang }) {
           </div>
         </div>
 
-        <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold border ${column.headerBadge}`}>
+        <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold border shrink-0 ${column.headerBadge}`}>
           {rooms.length}
         </span>
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar">
         {rooms.length === 0 ? (
-          <div className="h-44 rounded-xl border border-dashed border-slate-500/25 flex flex-col items-center justify-center text-center p-4 text-slate-500">
+          <div className="h-36 lg:h-44 rounded-xl border border-dashed border-slate-500/25 flex flex-col items-center justify-center text-center p-4 text-slate-500">
             <DoorClosed className="w-6 h-6 mb-1.5 opacity-40" />
             <p className="text-xs">{lang === 'vi' ? 'Chưa có phòng ở trạng thái này' : 'No rooms in this state'}</p>
             <p className="text-[10px] text-slate-500 mt-0.5">{lang === 'vi' ? 'Kéo thẻ phòng vào đây' : 'Drag a room card here'}</p>
@@ -209,12 +212,13 @@ function KanbanColumn({ column, rooms, isOver, isDark, lang }) {
 }
 
 export default function InteractiveRoomMatrix() {
-  const { theme, lang, t } = useApp();
+  const { theme, lang, t, onSocketEvent, serverStatus, subscribeDemoReset } = useApp();
   const isDark = theme === 'dark';
 
   const [rooms, setRooms] = useState([]);
   const [housekeepingQueue, setHousekeepingQueue] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFloor, setSelectedFloor] = useState('ALL');
   const [activeDragRoom, setActiveDragRoom] = useState(null);
@@ -223,15 +227,23 @@ export default function InteractiveRoomMatrix() {
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [completingRoomId, setCompletingRoomId] = useState(null);
 
+  const toastTimerRef = useRef(null);
+  const prevServerStatusRef = useRef(serverStatus);
+
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 5 },
-    })
+    useSensor(MouseSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 180, tolerance: 6 },
+    }),
+    useSensor(KeyboardSensor)
   );
 
   const showToast = useCallback((msg) => {
     setToastMessage(msg);
-    setTimeout(() => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
       setToastMessage(null);
     }, 3500);
   }, []);
@@ -239,12 +251,11 @@ export default function InteractiveRoomMatrix() {
   const fetchMatrixAndQueue = useCallback(async () => {
     try {
       setLoading(true);
-      const [roomRes, hkRes] = await Promise.all([
-        fetch('/api/rooms'),
-        fetch('/api/rooms/housekeeping/queue'),
+      const [roomData, hkData] = await Promise.all([
+        apiFetch('/api/rooms'),
+        apiFetch('/api/rooms/housekeeping/queue'),
       ]);
-      const roomData = await roomRes.json();
-      const hkData = await hkRes.json();
+      setLoadError('');
       if (roomData.success && Array.isArray(roomData.data)) {
         setRooms(roomData.data);
       }
@@ -252,7 +263,7 @@ export default function InteractiveRoomMatrix() {
         setHousekeepingQueue(hkData.data);
       }
     } catch (err) {
-      console.error('Failed to load room matrix:', err);
+      setLoadError(err.message || 'Unable to load room matrix.');
     } finally {
       setLoading(false);
     }
@@ -262,59 +273,73 @@ export default function InteractiveRoomMatrix() {
     let active = true;
     const init = async () => {
       try {
-        const [roomRes, hkRes] = await Promise.all([
-          fetch('/api/rooms'),
-          fetch('/api/rooms/housekeeping/queue'),
+        const [roomData, hkData] = await Promise.all([
+          apiFetch('/api/rooms'),
+          apiFetch('/api/rooms/housekeeping/queue'),
         ]);
-        const roomData = await roomRes.json();
-        const hkData = await hkRes.json();
         if (!active) return;
+        setLoadError('');
         if (roomData.success && Array.isArray(roomData.data)) setRooms(roomData.data);
         if (hkData.success && Array.isArray(hkData.data)) setHousekeepingQueue(hkData.data);
       } catch (err) {
-        console.error('Initial matrix fetch failed:', err);
+        if (active) setLoadError(err.message || 'Unable to load room matrix.');
       } finally {
         if (active) setLoading(false);
       }
     };
     init();
 
-    const socket = io();
-
-    socket.on('room:status_updated', (event) => {
-      setRooms((prev) =>
-        prev.map((r) => (r.id === event.roomId ? { ...r, status: event.status } : r))
-      );
-      showToast(`Room #${event.roomNumber} ➜ ${event.status}`);
-    });
-
-    socket.on('housekeeping:updated', fetchMatrixAndQueue);
-    socket.on('rooms:yield_updated', fetchMatrixAndQueue);
-    socket.on('booking:created', fetchMatrixAndQueue);
-    socket.on('system:demo_reset', fetchMatrixAndQueue);
-
-    socket.on('iot:action', (event) => {
-      if (event.smartControls) {
+    const unsubs = [
+      onSocketEvent('room:status_updated', (event) => {
+        if (!event?.roomId) return;
         setRooms((prev) =>
-          prev.map((r) =>
-            r.id === event.roomId ? { ...r, smartControls: JSON.stringify(event.smartControls) } : r
-          )
+          prev.map((r) => (r.id === event.roomId ? { ...r, status: event.status } : r))
         );
-      }
-    });
+        showToast(`Room #${event.roomNumber || ''} ➜ ${event.status}`);
+      }),
+      onSocketEvent('housekeeping:updated', fetchMatrixAndQueue),
+      onSocketEvent('rooms:yield_updated', fetchMatrixAndQueue),
+      onSocketEvent('booking:created', fetchMatrixAndQueue),
+      onSocketEvent('system:demo_reset', fetchMatrixAndQueue),
+      subscribeDemoReset(fetchMatrixAndQueue),
+      onSocketEvent('iot:action', (event) => {
+        if (event?.smartControls && event?.roomId) {
+          setRooms((prev) =>
+            prev.map((r) =>
+              r.id === event.roomId ? { ...r, smartControls: JSON.stringify(event.smartControls) } : r
+            )
+          );
+        }
+      }),
+    ];
 
     return () => {
       active = false;
-      socket.disconnect();
+      unsubs.forEach((unsub) => unsub());
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
-  }, [fetchMatrixAndQueue, showToast]);
+  }, [onSocketEvent, subscribeDemoReset, fetchMatrixAndQueue, showToast]);
+
+  useEffect(() => {
+    const prev = prevServerStatusRef.current;
+    prevServerStatusRef.current = serverStatus;
+    if (prev !== 'online' && serverStatus === 'online' && loadError) {
+      Promise.resolve().then(fetchMatrixAndQueue);
+    }
+  }, [serverStatus, loadError, fetchMatrixAndQueue]);
+
+  const floorOptions = useMemo(() => {
+    const unique = Array.from(
+      new Set(rooms.map((r) => String(r.floor ?? '')).filter(Boolean))
+    ).sort((a, b) => Number(a) - Number(b));
+    return ['ALL', ...(unique.length > 0 ? unique : ['1', '2', '3', '4'])];
+  }, [rooms]);
 
   const handleCompleteCleaning = async (roomId, roomNumber) => {
     setCompletingRoomId(roomId);
     try {
-      const res = await fetch(`/api/rooms/${roomId}/complete-cleaning`, { method: 'POST' });
-      const json = await res.json();
-      if (!res.ok || !json.success) throw new Error(json.message || 'Complete cleaning failed');
+      const json = await apiFetch(`/api/rooms/${roomId}/complete-cleaning`, { method: 'POST' });
+      if (!json.success) throw new Error(json.message || 'Complete cleaning failed');
       showToast(`✓ P.${roomNumber} ${t('đã hoàn tất dọn phòng ➜ AVAILABLE', 'cleaned & ready ➜ AVAILABLE')}`);
       await fetchMatrixAndQueue();
     } catch (err) {
@@ -329,11 +354,11 @@ export default function InteractiveRoomMatrix() {
     return rooms.filter((room) => {
       const guestName = room.bookings?.[0]?.guestName || room.bookings?.[0]?.user?.name || '';
       const matchesSearch =
-        room.number.toLowerCase().includes(q) ||
-        room.type.toLowerCase().includes(q) ||
-        guestName.toLowerCase().includes(q);
+        String(room.number || '').toLowerCase().includes(q) ||
+        String(room.type || '').toLowerCase().includes(q) ||
+        String(guestName).toLowerCase().includes(q);
 
-      const matchesFloor = selectedFloor === 'ALL' || room.floor.toString() === selectedFloor;
+      const matchesFloor = selectedFloor === 'ALL' || String(room.floor ?? '') === selectedFloor;
       return matchesSearch && matchesFloor;
     });
   }, [rooms, searchQuery, selectedFloor]);
@@ -361,7 +386,7 @@ export default function InteractiveRoomMatrix() {
     setActiveDragRoom(null);
     setActiveOverId(null);
 
-    if (!over) return;
+    if (!over || !COLUMNS.some((c) => c.id === over.id)) return;
 
     const roomId = active.id;
     const targetStatus = over.id;
@@ -377,18 +402,15 @@ export default function InteractiveRoomMatrix() {
     showToast(t(`Đang chuyển P.${draggedRoom.number} ➜ ${targetStatus}...`, `Moving Room #${draggedRoom.number} ➜ ${targetStatus}...`));
 
     try {
-      const res = await fetch(`/api/rooms/${roomId}/status`, {
+      const result = await apiFetch(`/api/rooms/${roomId}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: targetStatus }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json();
       if (!result.success) throw new Error(result.message || 'Failed to update status');
       await fetchMatrixAndQueue();
       showToast(`✓ P.${draggedRoom.number} ➜ ${targetStatus}`);
-    } catch (err) {
-      console.error('Drag update failed:', err);
+    } catch {
       setRooms((prev) =>
         prev.map((r) => (r.id === roomId ? { ...r, status: previousStatus } : r))
       );
@@ -398,13 +420,13 @@ export default function InteractiveRoomMatrix() {
 
   return (
     <div className="w-full max-w-7xl mx-auto p-4 md:p-8 space-y-6">
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-white/10 pb-6">
+      <div className={`flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b pb-6 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
         <div>
           <div className="flex items-center gap-2.5">
             <span className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-400/30 text-cyan-400">
               <Sliders className="w-5 h-5 text-cyan-400" />
             </span>
-            <h1 className={`text-2xl md:text-3xl font-bold tracking-tight flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
+            <h1 className={`text-2xl md:text-3xl font-bold tracking-tight flex flex-wrap items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
               {t('Sơ Đồ Buồng Phòng Trực Quan', 'Interactive Room Matrix')}
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-400/10 text-cyan-400 border border-cyan-400/30 font-medium">
                 Live Drag & Drop
@@ -425,25 +447,25 @@ export default function InteractiveRoomMatrix() {
             {t('Đặt Phòng Mới', 'New Booking')}
           </button>
 
-          <div className="relative">
+          <div className="relative w-full sm:w-auto">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t('Tìm số phòng hoặc tên khách...', 'Search room or guest...')}
-              className={`pl-9 pr-4 py-2 rounded-xl border text-xs focus:border-cyan-400 outline-none w-48 md:w-56 transition-all ${
+              className={`pl-9 pr-4 py-2 rounded-xl border text-xs focus:border-cyan-400 outline-none w-full sm:w-48 md:w-56 transition-all ${
                 isDark ? 'bg-[#1A1F2C] border-white/10 text-white placeholder-slate-500' : 'bg-white border-slate-300 text-slate-900 placeholder-slate-400'
               }`}
             />
           </div>
 
-          <div className={`flex items-center p-1 rounded-xl border text-xs ${isDark ? 'bg-[#1A1F2C] border-white/10' : 'bg-white border-slate-200'}`}>
-            {['ALL', '1', '2', '3', '4'].map((floor) => (
+          <div className={`flex items-center p-1 rounded-xl border text-xs overflow-x-auto max-w-full ${isDark ? 'bg-[#1A1F2C] border-white/10' : 'bg-white border-slate-200'}`}>
+            {floorOptions.map((floor) => (
               <button
                 key={floor}
                 onClick={() => setSelectedFloor(floor)}
-                className={`px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                className={`px-2.5 py-1.5 rounded-lg font-medium transition-all shrink-0 ${
                   selectedFloor === floor
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow-sm'
                     : isDark
@@ -467,10 +489,26 @@ export default function InteractiveRoomMatrix() {
         </div>
       </div>
 
+      {loadError && (
+        <div className="p-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 text-rose-300 text-xs flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={fetchMatrixAndQueue}
+            className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 font-semibold"
+          >
+            {t('Thử lại', 'Retry')}
+          </button>
+        </div>
+      )}
+
       {/* Smart Housekeeping Task Queue Banner */}
       <div className={`rounded-2xl border p-4 backdrop-blur-xl ${isDark ? 'bg-[#141925]/90 border-amber-400/25' : 'bg-amber-50/70 border-amber-200'}`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-          <div className="flex items-center gap-2 text-xs font-bold">
+          <div className="flex items-center gap-2 text-xs font-bold flex-wrap">
             <Sparkles className="w-4 h-4 text-amber-400" />
             <span>{t('Hàng Đợi Điều Phối Buồng Phòng Thông Minh (Smart Housekeeping Queue)', 'Smart Housekeeping Priority Queue')}</span>
             <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-400/30 font-mono text-[10px]">
@@ -503,7 +541,7 @@ export default function InteractiveRoomMatrix() {
                         ? 'bg-rose-500/15 text-rose-400 border-rose-400/30'
                         : 'bg-amber-500/15 text-amber-400 border-amber-400/30'
                     }`}>
-                      {task.tier} • {task.priorityScore}đ
+                      {task.tier} • {task.priorityScore ?? 0}đ
                     </span>
                     <span className="px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[9px] font-mono">
                       {task.taskStatus}
@@ -526,30 +564,47 @@ export default function InteractiveRoomMatrix() {
       </div>
 
       {/* Kanban Drag & Drop Workspace */}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCorners}
-        onDragStart={handleDragStart}
-        onDragOver={handleDragOver}
-        onDragEnd={handleDragEnd}
-      >
+      {loading && rooms.length === 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
           {COLUMNS.map((column) => (
-            <KanbanColumn
+            <div
               key={column.id}
-              column={column}
-              rooms={roomsByColumn[column.id] || []}
-              isOver={activeOverId === column.id}
-              isDark={isDark}
-              lang={lang}
-            />
+              className={`rounded-2xl border p-4 min-h-[260px] animate-pulse ${
+                isDark ? 'bg-[#141925]/60 border-white/10' : 'bg-slate-100 border-slate-200'
+              }`}
+            >
+              <div className="h-6 w-32 rounded bg-slate-500/20 mb-4" />
+              <div className="h-24 rounded-xl bg-slate-500/10 mb-3" />
+              <div className="h-24 rounded-xl bg-slate-500/10" />
+            </div>
           ))}
         </div>
+      ) : (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCorners}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            {COLUMNS.map((column) => (
+              <KanbanColumn
+                key={column.id}
+                column={column}
+                rooms={roomsByColumn[column.id] || []}
+                isOver={activeOverId === column.id}
+                isDark={isDark}
+                lang={lang}
+              />
+            ))}
+          </div>
 
-        <DragOverlay>
-          {activeDragRoom ? <DraggableRoomCard room={activeDragRoom} isOverlay={true} isDark={true} /> : null}
-        </DragOverlay>
-      </DndContext>
+          <DragOverlay>
+            {activeDragRoom ? <DraggableRoomCard room={activeDragRoom} isOverlay={true} isDark={true} /> : null}
+          </DragOverlay>
+        </DndContext>
+      )}
 
       <NewBookingModal
         isOpen={showBookingModal}
@@ -565,10 +620,10 @@ export default function InteractiveRoomMatrix() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className="fixed bottom-6 left-6 z-50 px-4 py-3 rounded-xl bg-[#1A1F2C] border border-cyan-400/40 text-cyan-300 text-xs font-semibold shadow-2xl flex items-center gap-2.5 backdrop-blur-xl"
+            className="fixed bottom-6 left-4 sm:left-6 max-w-[calc(100vw-6rem)] z-50 px-4 py-3 rounded-xl bg-[#1A1F2C] border border-cyan-400/40 text-cyan-300 text-xs font-semibold shadow-2xl flex items-center gap-2.5 backdrop-blur-xl"
           >
-            <Zap className="w-4 h-4 text-cyan-400 animate-pulse" />
-            <span>{toastMessage}</span>
+            <Zap className="w-4 h-4 text-cyan-400 animate-pulse shrink-0" />
+            <span className="truncate">{toastMessage}</span>
           </motion.div>
         )}
       </AnimatePresence>

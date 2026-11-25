@@ -81,11 +81,12 @@ define(['./workbox-5d155c7a'], (function (workbox) { 'use strict';
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
     "url": "index.html",
-    "revision": "0.k0nnig67na"
+    "revision": "0.4j2qepfspsg"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
-    allowlist: [/^\/$/]
+    allowlist: [/^\/$/],
+    denylist: [/^\/api\//, /^\/socket\.io\//]
   }));
   workbox.registerRoute(/^https:\/\/fonts\.googleapis\.com\/.*/i, new workbox.CacheFirst({
     "cacheName": "google-fonts-cache",
@@ -98,10 +99,10 @@ define(['./workbox-5d155c7a'], (function (workbox) { 'use strict';
   }), 'GET');
   workbox.registerRoute(/\/api\/rooms/, new workbox.NetworkFirst({
     "cacheName": "rooms-api-cache",
-    "networkTimeoutSeconds": 3,
+    "networkTimeoutSeconds": 50,
     plugins: [new workbox.ExpirationPlugin({
       maxEntries: 20,
-      maxAgeSeconds: 86400
+      maxAgeSeconds: 3600
     }), new workbox.CacheableResponsePlugin({
       statuses: [0, 200]
     })]

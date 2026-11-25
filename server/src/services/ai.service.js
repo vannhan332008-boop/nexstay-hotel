@@ -3,9 +3,25 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const apiKey = process.env.GEMINI_API_KEY;
+const geminiModelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+
 let genAI = null;
 if (apiKey && apiKey !== 'YOUR_GEMINI_API_KEY') {
   genAI = new GoogleGenerativeAI(apiKey);
+}
+
+async function withTimeout(promise, ms, label = 'External API') {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -18,7 +34,7 @@ export async function extractTextFromImage(imageBuffer, mimeType = 'image/jpeg',
   if (genAI) {
     try {
       const model = genAI.getGenerativeModel({
-        model: 'gemini-1.5-flash',
+        model: geminiModelName,
         generationConfig: {
           responseMimeType: 'application/json',
           temperature: 0.1,
@@ -48,17 +64,25 @@ Respond strictly with a valid JSON object matching this exact schema:
         },
       };
 
-      const result = await model.generateContent([prompt, imagePart]);
+      const result = await withTimeout(
+        model.generateContent([prompt, imagePart]),
+        12000,
+        'Gemini OCR'
+      );
       const text = result.response.text().trim();
       const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
-      return JSON.parse(cleanJson);
+      const parsed = JSON.parse(cleanJson);
+      if (parsed && (parsed.fullName || parsed.idNumber)) {
+        return parsed;
+      }
+      throw new Error('Incomplete OCR JSON from Gemini');
     } catch (err) {
       console.warn('⚠️ Gemini OCR fallback activated:', err.message);
     }
   }
 
   // Realistic neural simulation fallback (differentiates CCCD Việt Nam vs International Passport)
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await new Promise((resolve) => setTimeout(resolve, 900));
 
   if (hint === 'CCCD_VN') {
     const vnProfiles = [
@@ -100,12 +124,12 @@ Respond strictly with a valid JSON object matching this exact schema:
  * Parses Vietnamese or English Voice/Text Command into exact Room IoT or Service action
  */
 export async function parseVoiceIoTCommand(transcript = '', currentState = {}) {
-  const lower = transcript.toLowerCase().trim();
+  const lower = String(transcript || '').toLowerCase().trim();
 
   if (genAI) {
     try {
       const model = genAI.getGenerativeModel({
-        model: 'gemini-1.5-flash',
+        model: geminiModelName,
         generationConfig: {
           responseMimeType: 'application/json',
           temperature: 0.1,
@@ -128,9 +152,36 @@ Convert the guest's natural voice command ("${transcript}") into JSON:
   "spokenReply": "Short polite bilingual confirmation in the language of the command"
 }
 `;
-      const result = await model.generateContent(prompt);
+      const result = await withTimeout(model.generateContent(prompt), 8000, 'Gemini Voice NLU');
       const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
-      return JSON.parse(cleanJson);
+      const parsed = JSON.parse(cleanJson);
+      if (parsed && typeof parsed === 'object' && typeof parsed.spokenReply === 'string') {
+        const sanitizedUpdates = {};
+        if (parsed.updates && typeof parsed.updates === 'object') {
+          if (typeof parsed.updates.lights === 'boolean') sanitizedUpdates.lights = parsed.updates.lights;
+          if (['CYAN', 'VIOLET', 'GOLD', 'WARM'].includes(parsed.updates.ambientLighting)) {
+            sanitizedUpdates.ambientLighting = parsed.updates.ambientLighting;
+          }
+          if (Number.isFinite(Number(parsed.updates.acTemp))) {
+            sanitizedUpdates.acTemp = Math.min(30, Math.max(16, Math.round(Number(parsed.updates.acTemp))));
+          }
+          if (Number.isFinite(Number(parsed.updates.curtainsOpen))) {
+            sanitizedUpdates.curtainsOpen = Math.min(100, Math.max(0, Math.round(Number(parsed.updates.curtainsOpen))));
+          }
+          if (typeof parsed.updates.doorLocked === 'boolean') {
+            sanitizedUpdates.doorLocked = parsed.updates.doorLocked;
+          }
+          if (typeof parsed.updates.scene === 'string') {
+            sanitizedUpdates.scene = parsed.updates.scene;
+          }
+        }
+        return {
+          updates: sanitizedUpdates,
+          serviceRequest: parsed.serviceRequest || null,
+          spokenReply: parsed.spokenReply,
+        };
+      }
+      throw new Error('Malformed Voice NLU JSON from Gemini');
     } catch (err) {
       console.warn('⚠️ Gemini Voice NLU fallback activated:', err.message);
     }
@@ -204,9 +255,18 @@ Convert the guest's natural voice command ("${transcript}") into JSON:
     }
   }
 
-  // AC Temperature
-  const tempMatch = lower.match(/(\d{2})\s*(độ|°|c|degree)?/);
-  if (lower.includes('điều hòa') || lower.includes('máy lạnh') || lower.includes('nhiệt độ') || lower.includes('ac') || lower.includes('temp')) {
+  // AC Temperature (strip percentages like "80%" before matching temperature digits)
+  const lowerNoPct = lower.replace(/\d{1,3}\s*%/g, ' ');
+  const tempMatch =
+    lowerNoPct.match(/(?:điều hòa|máy lạnh|nhiệt độ|\bac\b|\btemp(?:erature)?\b)[^\d]*(\d{2})/) ||
+    lowerNoPct.match(/(\d{2})\s*(?:độ|°|degree)/);
+  if (
+    lower.includes('điều hòa') ||
+    lower.includes('máy lạnh') ||
+    lower.includes('nhiệt độ') ||
+    /\bac\b/.test(lower) ||
+    /\btemp(?:erature)?\b/.test(lower)
+  ) {
     if (tempMatch) {
       const temp = Math.min(30, Math.max(16, parseInt(tempMatch[1], 10)));
       updates.acTemp = temp;
@@ -256,12 +316,12 @@ Convert the guest's natural voice command ("${transcript}") into JSON:
  * 5-Star Bilingual AI Concierge "Nex" with Autonomous Service Action Triggering
  */
 export async function chatWithConcierge({ message, roomNumber = '302', language = 'vi', guestName = 'Quý khách' }) {
-  const lower = message.toLowerCase();
+  const lower = String(message || '').toLowerCase();
 
   if (genAI) {
     try {
       const model = genAI.getGenerativeModel({
-        model: 'gemini-1.5-flash',
+        model: geminiModelName,
         generationConfig: {
           responseMimeType: 'application/json',
           temperature: 0.4,
@@ -290,16 +350,23 @@ Respond strictly with JSON:
   }
 }
 `;
-      const result = await model.generateContent(prompt);
+      const result = await withTimeout(model.generateContent(prompt), 8000, 'Gemini Concierge');
       const cleanJson = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
-      return JSON.parse(cleanJson);
+      const parsed = JSON.parse(cleanJson);
+      if (parsed && typeof parsed.reply === 'string' && parsed.reply.trim()) {
+        return {
+          reply: parsed.reply,
+          action: parsed.action && typeof parsed.action === 'object' ? parsed.action : { type: 'NONE' },
+        };
+      }
+      throw new Error('Incomplete Concierge JSON from Gemini');
     } catch (err) {
       console.warn('⚠️ Gemini Concierge fallback activated:', err.message);
     }
   }
 
   // Intelligent bilingual concierge fallback with real action dispatching
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  await new Promise((resolve) => setTimeout(resolve, 400));
 
   const isVi = language === 'vi' || /[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]/i.test(lower);
 

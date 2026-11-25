@@ -1,15 +1,26 @@
-import { PrismaClient } from '@prisma/client';
+import crypto from 'crypto';
+import prisma from '../lib/prisma.js';
 import { io } from '../index.js';
-
-const prisma = new PrismaClient();
+import { getOrCreateGuestUser } from '../services/seedService.js';
 
 function escapeXml(value = '') {
-  return String(value)
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function sanitizeFilenameSegment(value = '', fallback = 'ID') {
+  const cleaned = String(value ?? '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  return (cleaned || fallback).slice(0, 40);
+}
+
+function formatIsoSafe(value, fallbackDate = new Date()) {
+  if (!value) return fallbackDate.toISOString();
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? fallbackDate.toISOString() : d.toISOString();
 }
 
 /**
@@ -51,68 +62,75 @@ export async function createSmartBooking(req, res) {
       isVip = false,
       paymentMethod = 'VIETQR',
       autoSyncPolice = false,
-    } = req.body;
+    } = req.body || {};
 
-    if (!guestName || (!roomId && !roomNumber)) {
+    const cleanGuestName = String(guestName || '').trim();
+    if (!cleanGuestName || (!roomId && !roomNumber)) {
       return res.status(400).json({ success: false, message: 'Guest name and room selection are required.' });
     }
 
     const room = roomId
-      ? await prisma.room.findUnique({ where: { id: roomId } })
+      ? await prisma.room.findUnique({ where: { id: String(roomId) } })
       : await prisma.room.findUnique({ where: { number: String(roomNumber) } });
 
     if (!room) {
       return res.status(404).json({ success: false, message: 'Selected room not found.' });
     }
 
-    const guestUser = await prisma.user.findFirst({ where: { role: 'GUEST' } });
-    if (!guestUser) {
-      return res.status(400).json({ success: false, message: 'No default guest user found.' });
-    }
-
     const checkInDate = checkIn ? new Date(checkIn) : new Date();
     const checkOutDate = checkOut ? new Date(checkOut) : new Date(checkInDate.getTime() + 2 * 86400000);
+    if (Number.isNaN(checkInDate.getTime()) || Number.isNaN(checkOutDate.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid check-in or check-out date.' });
+    }
+    if (checkOutDate.getTime() < checkInDate.getTime()) {
+      return res.status(400).json({ success: false, message: 'Check-out date cannot be earlier than check-in date.' });
+    }
+
+    const guestUser = await getOrCreateGuestUser();
+
     const diffMs = checkOutDate.getTime() - checkInDate.getTime();
     const nights = Math.max(1, Math.ceil(diffMs / 86400000));
 
     // Calculate total using current live AI Yield pricePerNight
     const totalAmount = Math.round(Number(room.pricePerNight || 0) * nights);
-    const digitalKey = `NEX-KEY-${room.number}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const digitalKey = `NEX-KEY-${room.number}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const cleanIdNumber = String(guestIdNumber || '').trim();
     const policeCode =
-      autoSyncPolice && guestIdNumber
+      autoSyncPolice && cleanIdNumber
         ? `C06-VN-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`
         : null;
 
-    const booking = await prisma.booking.create({
-      data: {
-        userId: guestUser.id,
-        roomId: room.id,
-        checkIn: checkInDate,
-        checkOut: checkOutDate,
-        totalAmount,
-        paymentStatus: 'PENDING',
-        paymentMethod,
-        bookingSource,
-        digitalKey,
-        guestName: String(guestName).trim(),
-        guestPhone: String(guestPhone || '').trim(),
-        guestIdNumber: guestIdNumber ? String(guestIdNumber).trim() : null,
-        guestNationality,
-        policeSyncStatus: policeCode ? 'SYNCED' : 'PENDING',
-        policeDeclarationId: policeCode,
-        isVip: Boolean(isVip),
-      },
-      include: {
-        room: true,
-        user: true,
-        charges: true,
-      },
-    });
-
-    const updatedRoom = await prisma.room.update({
-      where: { id: room.id },
-      data: { status: 'OCCUPIED' },
-    });
+    const [booking, updatedRoom] = await prisma.$transaction([
+      prisma.booking.create({
+        data: {
+          userId: guestUser.id,
+          roomId: room.id,
+          checkIn: checkInDate,
+          checkOut: checkOutDate,
+          totalAmount,
+          paymentStatus: 'PENDING',
+          paymentMethod: String(paymentMethod || 'VIETQR'),
+          bookingSource: String(bookingSource || 'ONLINE'),
+          digitalKey,
+          guestName: cleanGuestName,
+          guestPhone: String(guestPhone || '').trim(),
+          guestIdNumber: cleanIdNumber || null,
+          guestNationality: String(guestNationality || 'Việt Nam'),
+          policeSyncStatus: policeCode ? 'SYNCED' : 'PENDING',
+          policeDeclarationId: policeCode,
+          isVip: Boolean(isVip),
+        },
+        include: {
+          room: true,
+          user: true,
+          charges: true,
+        },
+      }),
+      prisma.room.update({
+        where: { id: room.id },
+        data: { status: 'OCCUPIED' },
+      }),
+    ]);
 
     if (io) {
       io.emit('room:status_updated', {
@@ -126,7 +144,7 @@ export async function createSmartBooking(req, res) {
         id: `BOOK-${Date.now()}`,
         roomNumber: room.number,
         type: 'NEW_BOOKING',
-        message: `🛎️ ${bookingSource === 'WALK_IN' ? 'Walk-in Tại Quầy' : 'Đặt Phòng Online'}: ${guestName} ➜ P.${room.number} (${nights} đêm • $${totalAmount})`,
+        message: `🛎️ ${bookingSource === 'WALK_IN' ? 'Walk-in Tại Quầy' : 'Đặt Phòng Online'}: ${cleanGuestName} ➜ P.${room.number} (${nights} đêm • $${totalAmount})`,
         timestamp: new Date().toISOString(),
         priority: isVip ? 'VIP' : 'HIGH',
       });
@@ -151,59 +169,73 @@ export async function createSmartBooking(req, res) {
 export async function addFolioCharge(req, res) {
   try {
     const { id } = req.params;
-    const { itemName, category = 'MINIBAR', quantity = 1, unitPrice } = req.body;
+    const { itemName, category = 'MINIBAR', quantity = 1, unitPrice } = req.body || {};
 
-    if (!itemName || !unitPrice) {
-      return res.status(400).json({ success: false, message: 'itemName and unitPrice are required.' });
+    const cleanItemName = String(itemName || '').trim();
+    const price = Number(unitPrice);
+    const rawQty = Number(quantity);
+
+    if (!cleanItemName || !Number.isFinite(price) || price <= 0 || !Number.isFinite(rawQty) || rawQty < 1 || rawQty > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid itemName, positive unitPrice, and quantity (1-100) are required.',
+      });
     }
 
-    const booking = await prisma.booking.findUnique({
-      where: { id },
-      include: { room: true, user: true },
+    const qty = Math.round(rawQty);
+    const lineTotal = +(qty * price).toFixed(2);
+
+    const txResult = await prisma.$transaction(async (tx) => {
+      const booking = await tx.booking.findUnique({
+        where: { id },
+        include: { room: true, user: true },
+      });
+
+      if (!booking) return null;
+
+      const charge = await tx.folioCharge.create({
+        data: {
+          bookingId: booking.id,
+          itemName: cleanItemName,
+          category: String(category || 'MINIBAR'),
+          quantity: qty,
+          unitPrice: price,
+          totalPrice: lineTotal,
+        },
+      });
+
+      const updatedBooking = await tx.booking.update({
+        where: { id: booking.id },
+        data: {
+          totalAmount: { increment: lineTotal },
+          paymentStatus: 'PENDING', // Re-open balance when new POS charges are added
+        },
+        include: {
+          room: true,
+          user: true,
+          charges: { orderBy: { createdAt: 'desc' } },
+        },
+      });
+
+      await tx.serviceRequest.create({
+        data: {
+          userId: booking.userId,
+          roomId: booking.roomId,
+          type: 'ROOM_SERVICE',
+          description: `POS Order: ${cleanItemName} x${qty} ($${lineTotal})`,
+          status: 'PENDING',
+          priority: booking.isVip ? 'VIP' : 'HIGH',
+        },
+      });
+
+      return { booking, charge, updatedBooking };
     });
 
-    if (!booking) {
+    if (!txResult) {
       return res.status(404).json({ success: false, message: 'Booking not found.' });
     }
 
-    const qty = Math.max(1, Number(quantity) || 1);
-    const price = Math.max(0, Number(unitPrice) || 0);
-    const lineTotal = +(qty * price).toFixed(2);
-
-    const charge = await prisma.folioCharge.create({
-      data: {
-        bookingId: booking.id,
-        itemName: String(itemName),
-        category: String(category),
-        quantity: qty,
-        unitPrice: price,
-        totalPrice: lineTotal,
-      },
-    });
-
-    const updatedBooking = await prisma.booking.update({
-      where: { id: booking.id },
-      data: {
-        totalAmount: +(Number(booking.totalAmount || 0) + lineTotal).toFixed(2),
-        paymentStatus: 'PENDING', // Re-open balance when new POS charges are added
-      },
-      include: {
-        room: true,
-        user: true,
-        charges: { orderBy: { createdAt: 'desc' } },
-      },
-    });
-
-    await prisma.serviceRequest.create({
-      data: {
-        userId: booking.userId,
-        roomId: booking.roomId,
-        type: 'ROOM_SERVICE',
-        description: `POS Order: ${itemName} x${qty} ($${lineTotal})`,
-        status: 'PENDING',
-        priority: booking.isVip ? 'VIP' : 'HIGH',
-      },
-    });
+    const { booking, charge, updatedBooking } = txResult;
 
     const roomNo = booking.room?.number || 'N/A';
 
@@ -218,7 +250,7 @@ export async function addFolioCharge(req, res) {
         id: `POS-${Date.now()}`,
         roomNumber: roomNo,
         type: 'ROOM_SERVICE',
-        message: `🍾 POS Phòng ${roomNo}: Đặt ${itemName} x${qty} (+$${lineTotal}) • Tổng bill mới: $${updatedBooking.totalAmount}`,
+        message: `🍾 POS Phòng ${roomNo}: Đặt ${cleanItemName} x${qty} (+$${lineTotal}) • Tổng bill mới: $${updatedBooking.totalAmount}`,
         timestamp: new Date().toISOString(),
         priority: 'VIP',
       });
@@ -252,59 +284,60 @@ export async function createExpressCheckIn(req, res) {
       isVip = true,
       autoSyncPolice = true,
       paymentMethod = 'VIETQR',
-    } = req.body;
+    } = req.body || {};
 
-    if (!fullName || !idNumber) {
+    const cleanFullName = String(fullName || '').trim();
+    const cleanIdNumber = String(idNumber || '').trim();
+
+    if (!cleanFullName || !cleanIdNumber) {
       return res.status(400).json({ success: false, message: 'Full name and ID/CCCD number are required.' });
     }
 
-    const safeNights = Math.max(1, Math.min(365, Number(nights) || 1));
+    const safeNights = Math.max(1, Math.min(365, Math.round(Number(nights) || 1)));
 
     const room = await prisma.room.findUnique({ where: { number: String(roomNumber) } });
     if (!room) {
       return res.status(404).json({ success: false, message: `Room ${roomNumber} not found.` });
     }
 
-    const guestUser = await prisma.user.findFirst({ where: { role: 'GUEST' } });
-    if (!guestUser) {
-      return res.status(400).json({ success: false, message: 'No guest profile available.' });
-    }
+    const guestUser = await getOrCreateGuestUser();
 
     const checkIn = new Date();
     const checkOut = new Date(checkIn.getTime() + safeNights * 86400000);
     const totalAmount = Math.round(Number(room.pricePerNight || 0) * safeNights);
-    const digitalKey = `NEX-KEY-${room.number}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const digitalKey = `NEX-KEY-${room.number}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const policeCode = autoSyncPolice
       ? `C06-VN-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`
       : null;
 
-    const booking = await prisma.booking.create({
-      data: {
-        userId: guestUser.id,
-        roomId: room.id,
-        checkIn,
-        checkOut,
-        totalAmount,
-        paymentStatus: 'PENDING',
-        paymentMethod,
-        bookingSource: 'OCR_EXPRESS',
-        digitalKey,
-        guestName: String(fullName).trim(),
-        guestIdNumber: String(idNumber).trim(),
-        guestDob: dob ? String(dob) : '',
-        guestAddress: address ? String(address) : '',
-        guestNationality: nationality || 'Việt Nam',
-        policeSyncStatus: autoSyncPolice ? 'SYNCED' : 'PENDING',
-        policeDeclarationId: policeCode,
-        isVip: Boolean(isVip),
-      },
-      include: { room: true, user: true, charges: true },
-    });
-
-    const updatedRoom = await prisma.room.update({
-      where: { id: room.id },
-      data: { status: 'OCCUPIED' },
-    });
+    const [booking, updatedRoom] = await prisma.$transaction([
+      prisma.booking.create({
+        data: {
+          userId: guestUser.id,
+          roomId: room.id,
+          checkIn,
+          checkOut,
+          totalAmount,
+          paymentStatus: 'PENDING',
+          paymentMethod: String(paymentMethod || 'VIETQR'),
+          bookingSource: 'OCR_EXPRESS',
+          digitalKey,
+          guestName: cleanFullName,
+          guestIdNumber: cleanIdNumber,
+          guestDob: dob ? String(dob) : '',
+          guestAddress: address ? String(address) : '',
+          guestNationality: nationality || 'Việt Nam',
+          policeSyncStatus: autoSyncPolice ? 'SYNCED' : 'PENDING',
+          policeDeclarationId: policeCode,
+          isVip: Boolean(isVip),
+        },
+        include: { room: true, user: true, charges: true },
+      }),
+      prisma.room.update({
+        where: { id: room.id },
+        data: { status: 'OCCUPIED' },
+      }),
+    ]);
 
     if (io) {
       io.emit('room:status_updated', {
@@ -318,7 +351,7 @@ export async function createExpressCheckIn(req, res) {
         id: `CHECKIN-${Date.now()}`,
         roomNumber: room.number,
         type: 'EXPRESS_CHECKIN',
-        message: `✨ Check-in AI hoàn tất: ${fullName} ➜ Phòng ${room.number}${autoSyncPolice ? ' (Đã đồng bộ Khai báo lưu trú C06)' : ''}`,
+        message: `✨ Check-in AI hoàn tất: ${cleanFullName} ➜ Phòng ${room.number}${autoSyncPolice ? ' (Đã đồng bộ Khai báo lưu trú C06)' : ''}`,
         timestamp: new Date().toISOString(),
         priority: isVip ? 'VIP' : 'NORMAL',
       });
@@ -414,13 +447,16 @@ export async function exportPoliceXml(req, res) {
     <QUOC_TICH>${escapeXml(booking.guestNationality || 'Việt Nam')}</QUOC_TICH>
     <DIA_CHI_THUONG_TRU>${escapeXml(booking.guestAddress || 'TP. Hồ Chí Minh, Việt Nam')}</DIA_CHI_THUONG_TRU>
     <SO_PHONG>${roomNo}</SO_PHONG>
-    <NGAY_DEN>${booking.checkIn.toISOString()}</NGAY_DEN>
-    <NGAY_DI_DU_KIEN>${booking.checkOut.toISOString()}</NGAY_DI_DU_KIEN>
+    <NGAY_DEN>${formatIsoSafe(booking.checkIn)}</NGAY_DEN>
+    <NGAY_DI_DU_KIEN>${formatIsoSafe(booking.checkOut)}</NGAY_DI_DU_KIEN>
   </KHACH_LUU_TRU>
 </KHAI_BAO_LUU_TRU>`;
 
+    const safeRoomFile = sanitizeFilenameSegment(booking.room?.number, '000');
+    const safeIdFile = sanitizeFilenameSegment(booking.guestIdNumber, '079095001234');
+
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="KhaiBaoLuuTru_${roomNo}_${idNo}.xml"`);
+    res.setHeader('Content-Disposition', `attachment; filename="KhaiBaoLuuTru_${safeRoomFile}_${safeIdFile}.xml"`);
     return res.send(xml);
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });

@@ -1,7 +1,7 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma.js';
 import { io } from '../index.js';
+import { getOrCreateGuestUser } from '../services/seedService.js';
 
-const prisma = new PrismaClient();
 const VALID_STATUSES = ['AVAILABLE', 'OCCUPIED', 'CLEANING', 'MAINTENANCE'];
 
 /**
@@ -93,7 +93,7 @@ export async function getHousekeepingQueue(req, res) {
 export async function updateRoomStatus(req, res) {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body || {};
 
     if (!VALID_STATUSES.includes(status)) {
       return res.status(400).json({
@@ -128,7 +128,7 @@ export async function updateRoomStatus(req, res) {
         where: { roomId: id, type: 'CLEANING', status: { not: 'COMPLETED' } },
       });
       if (!openTicket) {
-        const guestUser = await prisma.user.findFirst({ where: { role: 'GUEST' } });
+        const guestUser = await getOrCreateGuestUser();
         if (guestUser) {
           await prisma.serviceRequest.create({
             data: {
@@ -195,7 +195,7 @@ export async function requestRoomCleaning(req, res) {
     const room = await prisma.room.findUnique({ where: { id } });
     if (!room) return res.status(404).json({ success: false, message: 'Room not found.' });
 
-    const guestUser = await prisma.user.findFirst({ where: { role: 'GUEST' } });
+    const guestUser = await getOrCreateGuestUser();
     const updatedRoom = await prisma.room.update({
       where: { id },
       data: { status: 'CLEANING' },

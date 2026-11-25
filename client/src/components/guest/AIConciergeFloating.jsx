@@ -2,6 +2,36 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Send, Sparkles, Bot, CheckCircle2 } from 'lucide-react';
 import { useApp } from '../../context/useApp';
+import { apiFetch } from '../../utils/api';
+
+function buildOfflineConciergeFallback(text, roomNumber, lang, guestName) {
+  const lower = text.toLowerCase();
+  const isVi = lang === 'vi' || /[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]/i.test(lower);
+
+  if (lower.includes('khăn') || lower.includes('nước') || lower.includes('towel') || lower.includes('water')) {
+    return isVi
+      ? `[Chế độ Dự phòng] Dạ em đã ghi nhận yêu cầu thêm khăn & nước suối cho Phòng ${roomNumber}. Máy chủ đang khởi động lại — lễ tân sẽ xác nhận ngay khi kết nối khôi phục ạ.`
+      : `[Offline Fallback] Request noted for extra towels & water in Room ${roomNumber}. Backend is waking up — reception will confirm shortly.`;
+  }
+  if (lower.includes('steak') || lower.includes('ăn') || lower.includes('food') || lower.includes('dinner')) {
+    return isVi
+      ? `[Chế độ Dự phòng] Dạ thực đơn Wagyu Steak & Dining tại Phòng ${roomNumber} phục vụ 24/7 (~20 phút). Quý khách vui lòng thử gửi lại sau vài giây để tạo ticket trực tiếp tới Bếp ạ.`
+      : `[Offline Fallback] Room ${roomNumber} 24/7 dining is available (~20 min). Please retry in a few seconds once the server finishes waking up.`;
+  }
+  if (lower.includes('check-out') || lower.includes('checkout') || lower.includes('wifi') || lower.includes('wi-fi')) {
+    return isVi
+      ? `Dạ giờ trả phòng tiêu chuẩn là 12:00 trưa (Khách VIP miễn phí trả muộn đến 14:00). Wi-Fi 7: "NexStay_VIP_WiFi7" (tự động xác thực cho Phòng ${roomNumber}) ạ.`
+      : `Standard checkout is 12:00 PM (complimentary 2:00 PM late checkout for VIP). Wi-Fi 7: "NexStay_VIP_WiFi7" (auto-authenticated for Room ${roomNumber}).`;
+  }
+  if (lower.includes('gợi ý') || lower.includes('chơi') || lower.includes('quận 1') || lower.includes('recommend')) {
+    return isVi
+      ? `Gợi ý quanh NexStay: 1) Anan Saigon (Michelin, 5 phút), 2) Du thuyền Bến Bạch Đằng, 3) Phố đi bộ Nguyễn Huệ (3 phút).`
+      : `Top picks nearby: 1) Anan Saigon (Michelin, 5 min), 2) Bach Dang River Yacht Pier, 3) Nguyen Hue Walking Street.`;
+  }
+  return isVi
+    ? `Xin chào ${guestName}! Máy chủ đang đánh thức (~30–50s) hoặc tạm gián đoạn. Quý khách có thể hỏi giờ check-out, Wi-Fi, gợi ý Quận 1 hoặc thử gửi lại sau giây lát ạ.`
+    : `Hello ${guestName}! The backend server is waking up or temporarily unreachable. You can ask about checkout, Wi-Fi, or retry in a few seconds.`;
+}
 
 export default function AIConciergeFloating({ roomNumber = '302', guestName = 'Nguyễn Thảo Vy' }) {
   const { lang, t } = useApp();
@@ -36,16 +66,17 @@ export default function AIConciergeFloating({ roomNumber = '302', guestName = 'N
 
   const sendMessage = async (textToSend) => {
     const trimmed = (textToSend || input).trim();
-    if (!trimmed) return;
+    if (!trimmed || isTyping) return;
 
     setMessages((prev) => [...prev, { id: `u-${Date.now()}`, sender: 'user', text: trimmed }]);
     setInput('');
     setIsTyping(true);
 
     try {
-      const res = await fetch('/api/chat/concierge', {
+      const json = await apiFetch('/api/chat/concierge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        timeoutMs: 45000,
         body: JSON.stringify({
           message: trimmed,
           roomNumber,
@@ -53,8 +84,6 @@ export default function AIConciergeFloating({ roomNumber = '302', guestName = 'N
           guestName,
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
       setMessages((prev) => [
         ...prev,
         {
@@ -69,9 +98,9 @@ export default function AIConciergeFloating({ roomNumber = '302', guestName = 'N
       setMessages((prev) => [
         ...prev,
         {
-          id: `err-${Date.now()}`,
+          id: `fallback-${Date.now()}`,
           sender: 'bot',
-          text: t('Kết nối tạm gián đoạn, vui lòng thử lại sau giây lát ạ.', 'Temporary connection issue, please try again.'),
+          text: buildOfflineConciergeFallback(trimmed, roomNumber, lang, guestName),
         },
       ]);
     } finally {
@@ -102,7 +131,7 @@ export default function AIConciergeFloating({ roomNumber = '302', guestName = 'N
             initial={{ opacity: 0, y: 24, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 24, scale: 0.95 }}
-            className="fixed bottom-24 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[390px] h-[520px] rounded-3xl bg-[#121724]/95 border border-cyan-400/30 shadow-2xl backdrop-blur-2xl flex flex-col overflow-hidden text-white"
+            className="fixed bottom-24 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[390px] h-[520px] max-h-[calc(100vh-8rem)] rounded-3xl bg-[#121724]/95 border border-cyan-400/30 shadow-2xl backdrop-blur-2xl flex flex-col overflow-hidden text-white"
           >
             <div className="p-4 border-b border-white/10 bg-gradient-to-r from-violet-900/40 to-cyan-900/30 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
@@ -121,7 +150,7 @@ export default function AIConciergeFloating({ roomNumber = '302', guestName = 'N
               </div>
             </div>
 
-            <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
               {renderedMessages.map((m) => (
                 <motion.div
                   key={m.id}

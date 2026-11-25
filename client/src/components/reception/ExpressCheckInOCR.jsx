@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -21,9 +21,29 @@ import {
   FileCode2,
 } from 'lucide-react';
 import { useApp } from '../../context/useApp';
+import { apiFetch, apiUrl } from '../../utils/api';
+
+const DEMO_OCR_FALLBACK = {
+  CCCD_VN: {
+    fullName: 'NGUYỄN MINH ANH',
+    dob: '1996-03-22',
+    idNumber: '079196008214',
+    address: '45 Lê Lợi, P. Bến Thành, Quận 1, TP. Hồ Chí Minh',
+    nationality: 'Việt Nam',
+    gender: 'FEMALE',
+  },
+  PASSPORT: {
+    fullName: 'SOPHIA ELEANOR CHEN',
+    dob: '1994-08-14',
+    idNumber: 'P49201948',
+    address: '452 Horizon Blvd, Suite 800, Seattle, WA, USA',
+    nationality: 'United States',
+    gender: 'FEMALE',
+  },
+};
 
 export default function ExpressCheckInOCR() {
-  const { theme, t } = useApp();
+  const { theme, t, showCustomToast, onSocketEvent, serverStatus, subscribeDemoReset } = useApp();
   const isDark = theme === 'dark';
 
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -50,25 +70,70 @@ export default function ExpressCheckInOCR() {
 
   const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
+  const stepIntervalRef = useRef(null);
+  const roomsLoadFailedRef = useRef(false);
+  const prevServerStatusRef = useRef(serverStatus);
+
+  const fetchRooms = useCallback(async () => {
+    try {
+      const j = await apiFetch('/api/rooms');
+      roomsLoadFailedRef.current = false;
+      if (j.success && Array.isArray(j.data) && j.data.length > 0) {
+        setRooms(j.data);
+        setFormData((p) => {
+          const exists = j.data.some((x) => x.number === p.roomNumber);
+          if (exists) return p;
+          const avail = j.data.find((x) => x.status === 'AVAILABLE') || j.data[0];
+          return { ...p, roomNumber: avail.number };
+        });
+      }
+    } catch {
+      roomsLoadFailedRef.current = true;
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
-    fetch('/api/rooms')
-      .then((r) => r.json())
+    apiFetch('/api/rooms')
       .then((j) => {
-        if (active && j.success && Array.isArray(j.data) && j.data.length > 0) {
+        if (!active) return;
+        roomsLoadFailedRef.current = false;
+        if (j.success && Array.isArray(j.data) && j.data.length > 0) {
           setRooms(j.data);
-          const avail = j.data.find((x) => x.status === 'AVAILABLE') || j.data[0];
-          setFormData((p) => ({ ...p, roomNumber: avail.number }));
+          setFormData((p) => {
+            const exists = j.data.some((x) => x.number === p.roomNumber);
+            if (exists) return p;
+            const avail = j.data.find((x) => x.status === 'AVAILABLE') || j.data[0];
+            return { ...p, roomNumber: avail.number };
+          });
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (active) roomsLoadFailedRef.current = true;
+      });
+
+    const unsubs = [
+      onSocketEvent('room:status_updated', fetchRooms),
+      onSocketEvent('booking:created', fetchRooms),
+      onSocketEvent('system:demo_reset', fetchRooms),
+      subscribeDemoReset(fetchRooms),
+    ];
 
     return () => {
       active = false;
+      unsubs.forEach((unsub) => unsub());
+      if (stepIntervalRef.current) clearInterval(stepIntervalRef.current);
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     };
-  }, []);
+  }, [fetchRooms, onSocketEvent, subscribeDemoReset]);
+
+  useEffect(() => {
+    const prev = prevServerStatusRef.current;
+    prevServerStatusRef.current = serverStatus;
+    if (prev !== 'online' && serverStatus === 'online' && roomsLoadFailedRef.current) {
+      fetchRooms();
+    }
+  }, [serverStatus, fetchRooms]);
 
   const scanSteps = [
     t('Phân tích hình học thẻ CCCD / Hộ chiếu...', 'Analyzing document geometry & lighting...'),
@@ -90,13 +155,24 @@ export default function ExpressCheckInOCR() {
   };
 
   const processFile = async (imageFile, docHint = '') => {
+    if (!imageFile) return;
+    if (!imageFile.type.startsWith('image/')) {
+      setError(t('Vui lòng chỉ tải lên tệp ảnh (JPG, PNG, WEBP).', 'Please upload a valid image file (JPG, PNG, WEBP).'));
+      return;
+    }
+    if (imageFile.size > 10 * 1024 * 1024) {
+      setError(t('Ảnh vượt quá giới hạn 10MB.', 'Image exceeds the 10MB file limit.'));
+      return;
+    }
+
     setError(null);
     setCheckInReceipt(null);
     updatePreview(imageFile);
     setIsScanning(true);
     setScanStep(0);
 
-    const stepInterval = setInterval(() => {
+    if (stepIntervalRef.current) clearInterval(stepIntervalRef.current);
+    stepIntervalRef.current = setInterval(() => {
       setScanStep((prev) => (prev < scanSteps.length - 1 ? prev + 1 : prev));
     }, 380);
 
@@ -105,14 +181,18 @@ export default function ExpressCheckInOCR() {
     if (docHint) uploadData.append('docHint', docHint);
 
     try {
-      const response = await fetch('/api/checkin/ocr', {
+      const result = await apiFetch('/api/checkin/ocr', {
         method: 'POST',
         body: uploadData,
+        timeoutMs: 55000,
       });
-      const result = await response.json();
-      clearInterval(stepInterval);
 
-      if (!response.ok || !result.success || !result.data) {
+      if (stepIntervalRef.current) {
+        clearInterval(stepIntervalRef.current);
+        stepIntervalRef.current = null;
+      }
+
+      if (!result.success || !result.data) {
         throw new Error(result.message || 'OCR extraction failed.');
       }
 
@@ -126,8 +206,20 @@ export default function ExpressCheckInOCR() {
         gender: result.data.gender || 'FEMALE',
       }));
     } catch (err) {
-      clearInterval(stepInterval);
-      setError(err.message);
+      if (stepIntervalRef.current) {
+        clearInterval(stepIntervalRef.current);
+        stepIntervalRef.current = null;
+      }
+
+      if (docHint && DEMO_OCR_FALLBACK[docHint]) {
+        const fallback = DEMO_OCR_FALLBACK[docHint];
+        setFormData((prev) => ({ ...prev, ...fallback }));
+        showCustomToast(
+          t('⚡ Máy chủ đang đánh thức — đã điền dữ liệu OCR Demo cục bộ.', '⚡ Backend waking up — populated local Demo OCR profile.')
+        );
+      } else {
+        setError(err.message);
+      }
     } finally {
       setIsScanning(false);
     }
@@ -138,6 +230,7 @@ export default function ExpressCheckInOCR() {
     canvas.width = 640;
     canvas.height = 400;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     const grad = ctx.createLinearGradient(0, 0, 640, 400);
     grad.addColorStop(0, '#E8F3E8');
@@ -200,6 +293,7 @@ export default function ExpressCheckInOCR() {
     canvas.width = 600;
     canvas.height = 380;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     const grad = ctx.createLinearGradient(0, 0, 600, 380);
     grad.addColorStop(0, '#10172A');
@@ -244,14 +338,14 @@ export default function ExpressCheckInOCR() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch('/api/bookings/express-checkin', {
+      const json = await apiFetch('/api/bookings/express-checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData),
       });
-      const json = await res.json();
-      if (!res.ok || !json.success) throw new Error(json.message || 'Check-in failed');
+      if (!json.success) throw new Error(json.message || 'Check-in failed');
       setCheckInReceipt(json);
+      fetchRooms();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -260,6 +354,10 @@ export default function ExpressCheckInOCR() {
   };
 
   const handleReset = () => {
+    if (stepIntervalRef.current) {
+      clearInterval(stepIntervalRef.current);
+      stepIntervalRef.current = null;
+    }
     updatePreview(null);
     setIsScanning(false);
     setCheckInReceipt(null);
@@ -285,10 +383,10 @@ export default function ExpressCheckInOCR() {
 
   return (
     <div className="w-full max-w-6xl mx-auto p-4 md:p-8 space-y-6">
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-white/10 pb-5">
+      <div className={`flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b pb-5 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
         <div>
           <div className="flex items-center gap-2.5">
-            <span className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-400/30 text-cyan-400">
+            <span className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-400/30 text-cyan-400 shrink-0">
               <Sparkles className="w-5 h-5 animate-pulse" />
             </span>
             <h1 className={`text-2xl md:text-3xl font-bold tracking-tight flex flex-wrap items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
@@ -309,14 +407,16 @@ export default function ExpressCheckInOCR() {
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={loadDemoVietnameseCCCD}
-            className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-gradient-to-r from-rose-500/20 to-amber-500/20 hover:from-rose-500/35 hover:to-amber-500/35 text-amber-400 border border-amber-400/40 transition-all"
+            disabled={isScanning}
+            className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-gradient-to-r from-rose-500/20 to-amber-500/20 hover:from-rose-500/35 hover:to-amber-500/35 text-amber-400 border border-amber-400/40 transition-all disabled:opacity-50"
           >
             <Flag className="w-3.5 h-3.5 text-rose-400" />
             {t('Quét Thử CCCD Việt Nam', 'Demo Vietnam CCCD')}
           </button>
           <button
             onClick={loadDemoPassport}
-            className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-gradient-to-r from-violet-600/25 to-cyan-500/25 hover:from-violet-600/45 hover:to-cyan-500/45 text-cyan-400 border border-cyan-400/30 transition-all"
+            disabled={isScanning}
+            className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-gradient-to-r from-violet-600/25 to-cyan-500/25 hover:from-violet-600/45 hover:to-cyan-500/45 text-cyan-400 border border-cyan-400/30 transition-all disabled:opacity-50"
           >
             <Zap className="w-3.5 h-3.5 text-cyan-400" />
             {t('Quét Thử Hộ Chiếu QT', 'Demo Passport')}
@@ -342,11 +442,11 @@ export default function ExpressCheckInOCR() {
             onDrop={(e) => {
               e.preventDefault();
               setIsDragging(false);
-              const f = e.dataTransfer.files[0];
-              if (f && f.type.startsWith('image/')) processFile(f);
+              const f = e.dataTransfer.files?.[0];
+              if (f) processFile(f);
             }}
             onClick={() => !isScanning && fileInputRef.current?.click()}
-            className={`relative min-h-[370px] rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center p-6 cursor-pointer overflow-hidden ${
+            className={`relative min-h-[280px] sm:min-h-[370px] rounded-2xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center p-6 cursor-pointer overflow-hidden ${
               isDragging
                 ? 'border-cyan-400 bg-cyan-950/20 shadow-neon-cyan'
                 : previewUrl
@@ -359,13 +459,17 @@ export default function ExpressCheckInOCR() {
             <input
               type="file"
               ref={fileInputRef}
-              onChange={(e) => e.target.files[0] && processFile(e.target.files[0])}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) processFile(f);
+              }}
               accept="image/png, image/jpeg, image/webp"
               className="hidden"
             />
 
             {previewUrl ? (
-              <div className="relative w-full h-full min-h-[320px] flex items-center justify-center">
+              <div className="relative w-full h-full min-h-[260px] sm:min-h-[320px] flex items-center justify-center">
                 <img src={previewUrl} alt="Document Preview" className="max-h-[300px] w-auto rounded-xl object-contain shadow-2xl border border-white/10" />
 
                 <AnimatePresence>
@@ -399,7 +503,7 @@ export default function ExpressCheckInOCR() {
                   </p>
                   <p className="text-xs text-slate-400 mt-1">JPG, PNG, WEBP (Max 10MB)</p>
                 </div>
-                <div className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-400 flex items-center gap-1.5">
+                <div className={`px-3 py-1.5 rounded-lg border text-xs text-slate-400 flex items-center gap-1.5 ${isDark ? 'bg-white/5 border-white/10' : 'bg-slate-50 border-slate-200'}`}>
                   <Scan className="w-3.5 h-3.5 text-cyan-400" />
                   {t('Hỗ trợ nhận diện tiếng Việt có dấu 99.4%', 'Vietnamese diacritics & MRZ supported')}
                 </div>
@@ -416,8 +520,8 @@ export default function ExpressCheckInOCR() {
         </div>
 
         <div className="lg:col-span-7">
-          <div className={`p-6 md:p-8 rounded-2xl border backdrop-blur-xl relative overflow-hidden ${surfaceClass}`}>
-            <div className="flex items-center justify-between border-b border-white/10 pb-4 mb-5">
+          <div className={`p-5 sm:p-6 md:p-8 rounded-2xl border backdrop-blur-xl relative overflow-hidden ${surfaceClass}`}>
+            <div className={`flex flex-wrap items-center justify-between gap-2 border-b pb-4 mb-5 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
               <div>
                 <h3 className="text-lg font-bold flex items-center gap-2">
                   <FileText className="w-4 h-4 text-cyan-400" />
@@ -492,7 +596,7 @@ export default function ExpressCheckInOCR() {
                     min="1"
                     max="30"
                     value={formData.nights}
-                    onChange={(e) => setFormData({ ...formData, nights: Math.max(1, Number(e.target.value) || 1) })}
+                    onChange={(e) => setFormData({ ...formData, nights: Math.max(1, Math.min(30, Number(e.target.value) || 1)) })}
                     className={`w-full px-3.5 py-2.5 rounded-xl border text-sm font-mono outline-none ${inputClass}`}
                   />
                 </div>
@@ -524,7 +628,7 @@ export default function ExpressCheckInOCR() {
                     {rooms.length > 0 ? (
                       rooms.map((r) => (
                         <option key={r.id} value={r.number}>
-                          P.{r.number} - {r.type} (${r.pricePerNight}/nt) [{r.status}]
+                          P.{r.number} - {r.type} (${Number(r.pricePerNight || 0)}/nt) [{r.status}]
                         </option>
                       ))
                     ) : (
@@ -555,7 +659,7 @@ export default function ExpressCheckInOCR() {
 
               <button
                 type="submit"
-                disabled={!formData.fullName || isScanning || submitting}
+                disabled={!formData.fullName || !formData.idNumber || isScanning || submitting}
                 className="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-400 via-cyan-500 to-violet-600 hover:from-cyan-300 hover:to-violet-500 text-slate-950 font-bold text-sm tracking-wide transition-all shadow-neon-cyan disabled:opacity-40 flex items-center justify-center gap-2"
               >
                 <ShieldCheck className="w-4 h-4" />
@@ -569,48 +673,52 @@ export default function ExpressCheckInOCR() {
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.95 }}
-                  className="absolute inset-0 bg-[#0B0F19]/95 backdrop-blur-xl p-6 flex flex-col items-center justify-center text-center z-20 text-white"
+                  className="absolute inset-0 bg-[#0B0F19]/95 backdrop-blur-xl p-6 flex flex-col items-center justify-start sm:justify-center text-center z-20 text-white overflow-y-auto"
                 >
-                  <div className="p-2.5 rounded-2xl bg-white mb-3 shadow-2xl">
-                    <QRCodeSVG value={checkInReceipt.digitalKey} size={96} />
-                  </div>
-                  <h4 className="text-lg font-bold text-emerald-400 mb-1">
-                    {t('Check-In Thành Công & Đã Lưu DB!', 'Guest Checked In & Synced!')}
-                  </h4>
-                  <p className="text-xs text-slate-300 mb-4 max-w-sm">
-                    {t('Phòng', 'Room')} <strong className="text-cyan-400">#{checkInReceipt.booking?.room?.number}</strong> {t('đã chuyển sang OCCUPIED.', 'is now OCCUPIED.')}
-                    {checkInReceipt.policeDeclarationId && (
-                      <span className="block mt-1 text-emerald-300 font-mono">
-                        ✓ C06 Police ID: {checkInReceipt.policeDeclarationId}
-                      </span>
+                  <div className="my-auto flex flex-col items-center w-full">
+                    <div className="p-2.5 rounded-2xl bg-white mb-3 shadow-2xl">
+                      <QRCodeSVG value={checkInReceipt.digitalKey || 'NEX-KEY-LIVE'} size={96} />
+                    </div>
+                    <h4 className="text-lg font-bold text-emerald-400 mb-1">
+                      {t('Check-In Thành Công & Đã Lưu DB!', 'Guest Checked In & Synced!')}
+                    </h4>
+                    <p className="text-xs text-slate-300 mb-4 max-w-sm">
+                      {t('Phòng', 'Room')} <strong className="text-cyan-400">#{checkInReceipt.booking?.room?.number || formData.roomNumber}</strong> {t('đã chuyển sang OCCUPIED.', 'is now OCCUPIED.')}
+                      {checkInReceipt.policeDeclarationId && (
+                        <span className="block mt-1 text-emerald-300 font-mono">
+                          ✓ C06 Police ID: {checkInReceipt.policeDeclarationId}
+                        </span>
+                      )}
+                    </p>
+
+                    {checkInReceipt.booking?.id && (
+                      <div className="flex flex-wrap items-center justify-center gap-2.5 mb-5">
+                        <a
+                          href={apiUrl(`/api/bookings/${checkInReceipt.booking.id}/police-xml`)}
+                          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-xs font-bold hover:bg-emerald-500/30"
+                        >
+                          <FileCode2 className="w-3.5 h-3.5" />
+                          {t('Tải XML Công An C06', 'Download C06 XML')}
+                        </a>
+                        <a
+                          href={apiUrl(`/api/invoice/${checkInReceipt.booking.id}`)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 text-xs font-bold hover:bg-cyan-500/30"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          {t('Xuất Hóa Đơn PDF', 'Export PDF Invoice')}
+                        </a>
+                      </div>
                     )}
-                  </p>
 
-                  <div className="flex flex-wrap items-center justify-center gap-2.5 mb-5">
-                    <a
-                      href={`/api/bookings/${checkInReceipt.booking?.id}/police-xml`}
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-xs font-bold hover:bg-emerald-500/30"
+                    <button
+                      onClick={() => setCheckInReceipt(null)}
+                      className="px-6 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold border border-white/10"
                     >
-                      <FileCode2 className="w-3.5 h-3.5" />
-                      {t('Tải XML Công An C06', 'Download C06 XML')}
-                    </a>
-                    <a
-                      href={`/api/invoice/${checkInReceipt.booking?.id}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 text-xs font-bold hover:bg-cyan-500/30"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      {t('Xuất Hóa Đơn PDF', 'Export PDF Invoice')}
-                    </a>
+                      {t('Đóng & Tiếp Tục Đón Khách', 'Done & Next Guest')}
+                    </button>
                   </div>
-
-                  <button
-                    onClick={() => setCheckInReceipt(null)}
-                    className="px-6 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold border border-white/10"
-                  >
-                    {t('Đóng & Tiếp Tục Đón Khách', 'Done & Next Guest')}
-                  </button>
                 </motion.div>
               )}
             </AnimatePresence>
