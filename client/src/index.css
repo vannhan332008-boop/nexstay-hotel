@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme {
+  --shadow-neon-cyan: 0 0 22px -3px rgba(0, 243, 255, 0.4);
+  --shadow-neon-violet: 0 0 22px -3px rgba(138, 43, 226, 0.42);
+}
+
+@layer base {
+  :root {
+    --bg-main: #0B0F19;
+    --bg-surface: #1A1F2C;
+    --bg-surface-light: #242B3D;
+    --accent-cyan: #00F3FF;
+    --accent-violet: #8A2BE2;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Scrollbar utilities */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}
+
+/* Glassmorphism custom classes */
+.glass-panel {
+  background: rgba(26, 31, 44, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel-elevated {
+  background: rgba(36, 43, 61, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 243, 255, 0.2);
+}
+
+/* Laser Scanner Animation Keyframes */
+@keyframes laserSweep {
+  0% {
+    top: 0%;
+    opacity: 0.8;
+  }
+  50% {
+    top: 96%;
+    opacity: 1;
+  }
+  100% {
+    top: 0%;
+    opacity: 0.8;
+  }
+}
+
+.animate-laser {
+  animation: laserSweep 2s ease-in-out infinite;
+}
+
+.neon-text-cyan {
+  text-shadow: 0 0 10px rgba(0, 243, 255, 0.6);
+}

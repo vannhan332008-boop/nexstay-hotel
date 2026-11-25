@@ -1,0 +1,136 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  RECEPTIONIST
+  HOUSEKEEPING
+  GUEST
+}
+
+enum RoomStatus {
+  AVAILABLE
+  OCCUPIED
+  CLEANING
+  MAINTENANCE
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id              String           @id @default(uuid())
+  email           String           @unique
+  password        String
+  name            String
+  role            Role             @default(GUEST)
+  phone           String?
+  bookings        Booking[]
+  serviceRequests ServiceRequest[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model Room {
+  id                String           @id @default(uuid())
+  number            String           @unique
+  type              String           // e.g. "Deluxe Suite", "Cyber Executive", "Penthouse"
+  pricePerNight     Float
+  basePricePerNight Float?           // Original base price for AI Yield Pricing calculations
+  yieldMultiplier   Float            @default(1.0)
+  status            RoomStatus       @default(AVAILABLE)
+  floor             Int
+  amenities         String           // Comma-separated or JSON string
+  smartControls     String?          // JSON: {"lights": true, "ambientLighting": "CYAN", "acTemp": 21, "curtainsOpen": 100, "doorLocked": true, "scene": "RELAX"}
+  bookings          Booking[]
+  serviceRequests   ServiceRequest[]
+  iotLogs           IoTLog[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+model Booking {
+  id                  String           @id @default(uuid())
+  userId              String
+  roomId              String
+  checkIn             DateTime
+  checkOut            DateTime
+  totalAmount         Float
+  paymentStatus       PaymentStatus    @default(PENDING)
+  paymentMethod       String           @default("VNPAY") // VNPAY | VIETQR | CASH
+  bookingSource       String           @default("ONLINE") // ONLINE | WALK_IN | OCR_EXPRESS
+  digitalKey          String           @unique @default(uuid())
+  guestName           String?
+  guestPhone          String?
+  guestIdNumber       String?          // CCCD gắn chip / Passport
+  guestDob            String?
+  guestAddress        String?
+  guestNationality    String?          @default("Việt Nam")
+  policeSyncStatus    String           @default("PENDING") // PENDING | SYNCED
+  policeDeclarationId String?
+  isVip               Boolean          @default(false)
+  user                User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room                Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  charges             FolioCharge[]
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+}
+
+model FolioCharge {
+  id          String   @id @default(uuid())
+  bookingId   String
+  itemName    String
+  category    String   // MINIBAR | LAUNDRY | DINING | TRANSPORT | SPA
+  quantity    Int      @default(1)
+  unitPrice   Float
+  totalPrice  Float
+  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+}
+
+model ServiceRequest {
+  id              String           @id @default(uuid())
+  type            String           // e.g., "CLEANING", "TOWELS", "ROOM_SERVICE", "MAINTENANCE", "SPA"
+  description     String?
+  status          String           @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
+  priority        String           @default("NORMAL")  // VIP, HIGH, NORMAL
+  userId          String
+  roomId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room            Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model IoTLog {
+  id              String           @id @default(uuid())
+  roomId          String
+  device          String           // LIGHTS | AC | CURTAINS | DOOR_LOCK | SCENE
+  action          String           // e.g. "SET_TEMP", "UNLOCK", "OPEN_CURTAINS"
+  value           String?          // e.g. "20°C", "80%", "VIOLET"
+  source          String           @default("UI") // UI | VOICE_AI | CONCIERGE
+  room            Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdAt       DateTime         @default(now())
+}
+
+model ConciergeLog {
+  id              String           @id @default(uuid())
+  roomNumber      String?
+  query           String
+  reply           String
+  actionTriggered String?          // e.g. "SERVICE_REQUEST:TOWELS" or "IOT:LIGHTS"
+  language        String           @default("vi")
+  createdAt       DateTime         @default(now())
+}
